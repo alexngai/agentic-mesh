@@ -1,0 +1,19 @@
+# Source files (dist is published via "files" in package.json)
+src/
+tsconfig.json
+
+# Development
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Tests
+__tests__/
+*.test.ts
+*.spec.ts
+coverage/
+
+# Misc
+.DS_Store
+*.log

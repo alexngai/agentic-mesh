@@ -1,0 +1,40 @@
+{
+  "name": "agentic-mesh",
+  "version": "0.0.1",
+  "description": "Agentic Mesh",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "publish:npm": "npm publish"
+  },
+  "keywords": [],
+  "author": "Alex Ngai",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexngai/agentic-mesh.git"
+  },
+  "bugs": {
+    "url": "https://github.com/alexngai/agentic-mesh/issues"
+  },
+  "homepage": "https://github.com/alexngai/agentic-mesh#readme",
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
+}
