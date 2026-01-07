@@ -10,6 +10,7 @@ export interface PeerInfo {
   id: string
   name?: string
   nebulaIp: string
+  port?: number
   status: PeerStatus
   lastSeen: Date
   groups: string[]
@@ -26,6 +27,7 @@ export interface PeerConfig {
   id: string
   nebulaIp: string
   name?: string
+  port?: number // Override default port for this peer
 }
 
 export interface NebulaMeshConfig {

@@ -6,6 +6,9 @@ export { NebulaMesh } from './mesh'
 export { MessageChannel } from './channel'
 export { SyncProvider, YjsSyncProvider } from './sync'
 
+// Integrations
+export * from './integrations'
+
 // Type exports
 export type {
   // Peer types

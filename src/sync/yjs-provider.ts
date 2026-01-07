@@ -154,20 +154,24 @@ export class YjsSyncProvider extends SyncProvider {
   }
 
   private handleMessage(msg: YjsWireMessage, from: PeerInfo): void {
-    const data = new Uint8Array(msg.data)
-    const decoder = decoding.createDecoder(data)
-    const messageType = decoding.readVarUint(decoder)
+    try {
+      const data = new Uint8Array(msg.data)
+      const decoder = decoding.createDecoder(data)
+      const messageType = decoding.readVarUint(decoder)
 
-    switch (messageType) {
-      case MSG_SYNC_STEP_1:
-        this.handleSyncStep1(decoder, from.id)
-        break
-      case MSG_SYNC_STEP_2:
-        this.handleSyncStep2(decoder, from.id)
-        break
-      case MSG_UPDATE:
-        this.handleUpdate(decoder, from.id)
-        break
+      switch (messageType) {
+        case MSG_SYNC_STEP_1:
+          this.handleSyncStep1(decoder, from.id)
+          break
+        case MSG_SYNC_STEP_2:
+          this.handleSyncStep2(decoder, from.id)
+          break
+        case MSG_UPDATE:
+          this.handleUpdate(decoder, from.id)
+          break
+      }
+    } catch {
+      // Silently ignore malformed messages (can happen during peer disconnection)
     }
   }
 

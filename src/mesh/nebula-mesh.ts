@@ -27,6 +27,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   private channels: Map<string, MessageChannel<unknown>> = new Map()
   private namespaces: Set<string> = new Set()
   private _connected = false
+  private _disconnecting = false
 
   constructor(config: NebulaMeshConfig) {
     super()
@@ -62,6 +63,9 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
 
   async disconnect(): Promise<void> {
     if (!this._connected) return
+
+    // Mark as disconnecting to suppress errors during shutdown
+    this._disconnecting = true
 
     // Close all channels
     for (const channel of this.channels.values()) {
@@ -122,6 +126,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       id: config.id,
       name: config.name,
       nebulaIp: config.nebulaIp,
+      port: config.port,
       status: 'unknown',
       lastSeen: new Date(0),
       groups: [],
@@ -205,7 +210,9 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   private async connectToPeers(): Promise<void> {
     const connectPromises = Array.from(this.peers.values()).map((peer) =>
       this.connectToPeer(peer).catch((err) => {
-        console.warn(`Failed to connect to peer ${peer.id}:`, err.message)
+        if (!this._disconnecting) {
+          console.warn(`Failed to connect to peer ${peer.id}:`, err.message)
+        }
       })
     )
     await Promise.all(connectPromises)
@@ -218,7 +225,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       const socket = net.createConnection(
         {
           host: peer.nebulaIp,
-          port: this.config.port,
+          port: peer.port ?? this.config.port,
           timeout: this.config.connectionTimeout,
         },
         () => {
@@ -272,21 +279,26 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
             this.handleMessage(peerId, msg)
           }
         } catch (err) {
-          console.error('Failed to parse message:', err)
+          // Only log errors when not disconnecting (to avoid noise during shutdown)
+          if (!this._disconnecting) {
+            console.error('Failed to parse message:', err)
+          }
         }
       }
     })
 
     socket.on('close', () => {
-      if (peerId) {
+      if (peerId && !this._disconnecting) {
         this.handlePeerDisconnect(peerId)
       }
     })
 
     socket.on('error', (err) => {
-      console.error('Socket error:', err)
-      if (peerId) {
-        this.handlePeerDisconnect(peerId)
+      if (!this._disconnecting) {
+        console.error('Socket error:', err)
+        if (peerId) {
+          this.handlePeerDisconnect(peerId)
+        }
       }
     })
   }
@@ -295,6 +307,9 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
     let buffer = ''
 
     socket.on('data', (data) => {
+      // Ignore data during disconnection
+      if (this._disconnecting) return
+
       buffer += data.toString()
 
       const lines = buffer.split('\n')
@@ -307,17 +322,23 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
           const msg = JSON.parse(line)
           this.handleMessage(peerId, msg)
         } catch (err) {
-          console.error('Failed to parse message:', err)
+          if (!this._disconnecting) {
+            console.error('Failed to parse message:', err)
+          }
         }
       }
     })
 
     socket.on('close', () => {
-      this.handlePeerDisconnect(peerId)
+      if (!this._disconnecting) {
+        this.handlePeerDisconnect(peerId)
+      }
     })
 
     socket.on('error', (err) => {
-      console.error(`Socket error for peer ${peerId}:`, err)
+      if (!this._disconnecting) {
+        console.error(`Socket error for peer ${peerId}:`, err)
+      }
     })
   }
 
