@@ -106,6 +106,9 @@ export interface MessageChannelConfig {
   retryAttempts?: number // Default: 3
   retryDelay?: number // Default: 1000ms
   timeout?: number // Default: 30000ms
+
+  // Permission enforcement (Phase 5)
+  requiredGroups?: string[] // Groups required to send messages (empty = allow all)
 }
 
 export interface QueuedMessage<T = unknown> {
@@ -128,6 +131,7 @@ export interface ChannelStats {
   messagesReceived: number
   queuedMessages: number
   failedDeliveries: number
+  permissionDenied?: number // Phase 5: count of messages rejected due to permission
 }
 
 // Wire format for messages

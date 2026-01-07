@@ -363,12 +363,15 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   // Channel Factory
   // ==========================================================================
 
-  createChannel<T>(name: string): MessageChannel<T> {
+  createChannel<T>(
+    name: string,
+    config?: import('../types').MessageChannelConfig
+  ): MessageChannel<T> {
     if (this.channels.has(name)) {
       return this.channels.get(name) as MessageChannel<T>
     }
 
-    const channel = new MessageChannel<T>(this, name)
+    const channel = new MessageChannel<T>(this, name, config)
     this.channels.set(name, channel as MessageChannel<unknown>)
     return channel
   }

@@ -2,6 +2,14 @@
 // Provides mesh sync for sudocode specs, issues, relationships, and feedback
 
 export { SudocodeMeshService } from './service'
+export { MultiProjectManager } from './multi-project'
+export type {
+  MultiProjectConfig,
+  ProjectInfo,
+  ProjectAddedEvent,
+  ProjectRemovedEvent,
+  ProjectSyncedEvent,
+} from './multi-project'
 export { EntityMapper } from './mapper'
 export { JSONLBridge } from './jsonl-bridge'
 export type { SudocodeState } from './jsonl-bridge'

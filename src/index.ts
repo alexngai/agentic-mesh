@@ -5,6 +5,13 @@
 export { NebulaMesh } from './mesh'
 export { HealthMonitor } from './mesh/health-monitor'
 export type { HealthMonitorConfig, PeerHealth, HealthChangeEvent } from './mesh/health-monitor'
+export { ExecutionRouter } from './mesh/execution-router'
+export type {
+  ExecutionRequest,
+  ExecutionResponse,
+  ExecutionRequestEvent,
+  ExecutionRouterConfig,
+} from './mesh/execution-router'
 export { MessageChannel, OfflineQueue } from './channel'
 export type { QueuedOperation, OfflineQueueConfig } from './channel'
 export { SyncProvider, YjsSyncProvider } from './sync'

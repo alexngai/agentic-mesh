@@ -9,14 +9,17 @@ import { OfflineQueue } from './offline-queue'
 export class MessageChannel<T = unknown> extends EventEmitter {
   readonly name: string
   private mesh: NebulaMesh
-  private config: Required<MessageChannelConfig>
+  private config: Required<Omit<MessageChannelConfig, 'requiredGroups'>> & {
+    requiredGroups: string[]
+  }
   private _open = false
   private offlineQueue: OfflineQueue | null = null
-  private stats: ChannelStats = {
+  private stats: ChannelStats & { permissionDenied: number } = {
     messagesSent: 0,
     messagesReceived: 0,
     queuedMessages: 0,
     failedDeliveries: 0,
+    permissionDenied: 0,
   }
 
   constructor(mesh: NebulaMesh, name: string, config?: MessageChannelConfig) {
@@ -30,6 +33,7 @@ export class MessageChannel<T = unknown> extends EventEmitter {
       retryAttempts: config?.retryAttempts ?? 3,
       retryDelay: config?.retryDelay ?? 1000,
       timeout: config?.timeout ?? 30000,
+      requiredGroups: config?.requiredGroups ?? [],
     }
 
     // Initialize offline queue if enabled
@@ -180,8 +184,45 @@ export class MessageChannel<T = unknown> extends EventEmitter {
 
   /** @internal - Called by NebulaMesh when a message arrives */
   _receiveMessage(message: T, from: PeerInfo): void {
+    // Check permission if required groups are configured
+    if (!this.checkSenderPermission(from)) {
+      this.stats.permissionDenied++
+      this.emit('permission:denied', {
+        from,
+        reason: 'Sender lacks required group membership',
+        requiredGroups: this.config.requiredGroups,
+        senderGroups: from.groups,
+      })
+      return // Drop the message
+    }
+
     this.stats.messagesReceived++
     this.emit('message', message, from)
+  }
+
+  // ==========================================================================
+  // Permission Checking
+  // ==========================================================================
+
+  /**
+   * Check if a peer has permission to send messages on this channel.
+   * Returns true if no required groups are configured or if peer has at least one required group.
+   */
+  private checkSenderPermission(peer: PeerInfo): boolean {
+    // If no required groups, allow all
+    if (this.config.requiredGroups.length === 0) {
+      return true
+    }
+
+    // Check if peer has at least one required group
+    return this.config.requiredGroups.some((group) => peer.groups.includes(group))
+  }
+
+  /**
+   * Get the required groups for this channel.
+   */
+  getRequiredGroups(): string[] {
+    return [...this.config.requiredGroups]
   }
 
   // ==========================================================================
@@ -198,6 +239,7 @@ export class MessageChannel<T = unknown> extends EventEmitter {
       messagesReceived: 0,
       queuedMessages: 0,
       failedDeliveries: 0,
+      permissionDenied: 0,
     }
   }
 }
