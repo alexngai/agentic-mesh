@@ -9,6 +9,53 @@ export { MessageChannel, OfflineQueue } from './channel'
 export type { QueuedOperation, OfflineQueueConfig } from './channel'
 export { SyncProvider, YjsSyncProvider } from './sync'
 
+// Certificate management
+export {
+  CertManager,
+  ConfigGenerator,
+  configGenerator,
+  GroupPermissions,
+  groupPermissions,
+  PermissionLevel,
+  PermissionDeniedError,
+  LighthouseManager,
+} from './certs'
+export type {
+  CertManagerConfig,
+  AutoRenewalConfig,
+  CertificateInfo,
+  CertificateIndex,
+  CreateRootCAOptions,
+  CreateUserCAOptions,
+  SignServerCertOptions,
+  SetupValidation,
+  CertVerification,
+  CertEventType,
+  CertCreatedEvent,
+  CertRenewedEvent,
+  CertExpiringEvent,
+  CertRevokedEvent,
+  RevocationEntry,
+  RevocationList,
+  RevocationListExport,
+  NebulaConfigOptions,
+  LighthouseConfigOptions,
+  FirewallConfig,
+  FirewallRule,
+  DnsConfig,
+  LoggingConfig,
+  GroupHierarchy,
+  GroupPermissionsConfig,
+  PermissionCheckResult,
+  LighthouseStatus,
+  LighthouseInfo,
+  LighthouseIndex,
+  LighthouseManagerConfig,
+  CreateLighthouseOptions,
+  LighthouseHealth,
+  LighthouseEventType,
+} from './certs'
+
 // Integrations
 export * from './integrations'
 
