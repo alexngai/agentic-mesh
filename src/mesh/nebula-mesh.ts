@@ -9,12 +9,26 @@ import type {
   PeerConfig,
   MeshContext,
   WireMessage,
+  HubConfig,
 } from '../types'
+import { HubRole } from '../types'
 import { MessageChannel } from '../channel/message-channel'
+import { HubElection } from './hub-election'
+import {
+  NamespaceRegistry,
+  NamespaceUpdate,
+  NamespaceSnapshot,
+} from './namespace-registry'
+import { HealthMonitor, HealthChangeEvent } from './health-monitor'
 
 const DEFAULT_PORT = 7946
 const DEFAULT_CONNECTION_TIMEOUT = 30000
 const DEFAULT_HEALTH_CHECK_INTERVAL = 10000
+
+const DEFAULT_HUB_CONFIG: HubConfig = {
+  role: HubRole.MEMBER,
+  priority: 0,
+}
 
 export class NebulaMesh extends EventEmitter implements MeshContext {
   private config: Required<
@@ -28,6 +42,9 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   private namespaces: Set<string> = new Set()
   private _connected = false
   private _disconnecting = false
+  private hubElection: HubElection
+  private namespaceRegistry: NamespaceRegistry
+  private healthMonitor: HealthMonitor
 
   constructor(config: NebulaMeshConfig) {
     super()
@@ -37,6 +54,63 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       connectionTimeout: config.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT,
       groups: config.groups ?? [],
     }
+
+    // Initialize hub election
+    const hubConfig = config.hub ?? DEFAULT_HUB_CONFIG
+    this.hubElection = new HubElection({
+      peerId: config.peerId,
+      hubConfig,
+    })
+
+    // Initialize namespace registry
+    this.namespaceRegistry = new NamespaceRegistry(config.peerId)
+
+    // Initialize health monitor
+    const healthCheckInterval = config.healthCheckInterval ?? DEFAULT_HEALTH_CHECK_INTERVAL
+    this.healthMonitor = new HealthMonitor({
+      heartbeatInterval: healthCheckInterval,
+    })
+
+    // Handle health monitor events
+    this.healthMonitor.on('health:changed', (event: HealthChangeEvent) => {
+      const peer = this.peers.get(event.peerId)
+      if (peer && event.newStatus === 'offline') {
+        this.handlePeerDisconnect(event.peerId)
+      }
+      this.emit('peer:health', event)
+    })
+
+    this.healthMonitor.on('hub:unhealthy', (hubId: string) => {
+      // Trigger hub re-election when hub becomes unhealthy
+      const peer = this.peers.get(hubId)
+      if (peer) {
+        this.hubElection.peerLeft(peer)
+      }
+    })
+
+    // Forward namespace events
+    this.namespaceRegistry.on('namespace:updated', (update: NamespaceUpdate) => {
+      // Hub broadcasts namespace updates to all peers
+      if (this.isHub()) {
+        this.broadcastNamespaceUpdate(update)
+      }
+    })
+
+    // Forward hub events
+    this.hubElection.on('hub:changed', (event) => {
+      this.emit('hub:changed', event)
+      // Update health monitor with new hub
+      this.healthMonitor.setHubId(event.current)
+      // Broadcast hub announcement to all peers
+      this.broadcastHubAnnouncement()
+
+      // If we became hub, register our local namespaces
+      if (event.current === config.peerId) {
+        for (const ns of this.namespaces) {
+          this.namespaceRegistry.registerPeer(ns, config.peerId)
+        }
+      }
+    })
 
     // Initialize peer info from config
     for (const peerConfig of config.peers) {
@@ -58,6 +132,14 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
     await this.connectToPeers()
 
     this._connected = true
+
+    // Start hub election after connections established
+    this.hubElection.updatePeers(Array.from(this.peers.values()))
+    this.hubElection.start()
+
+    // Start health monitoring
+    this.healthMonitor.start((peerId) => this.sendPing(peerId))
+
     this.emit('connected')
   }
 
@@ -66,6 +148,12 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
 
     // Mark as disconnecting to suppress errors during shutdown
     this._disconnecting = true
+
+    // Stop health monitoring
+    this.healthMonitor.stop()
+
+    // Stop hub election
+    this.hubElection.stop()
 
     // Close all channels
     for (const channel of this.channels.values()) {
@@ -108,6 +196,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   }
 
   getSelf(): PeerInfo {
+    const hubConfig = this.config.hub ?? DEFAULT_HUB_CONFIG
     return {
       id: this.config.peerId,
       name: this.config.peerName,
@@ -116,8 +205,9 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       lastSeen: new Date(),
       groups: this.config.groups ?? [],
       activeNamespaces: Array.from(this.namespaces),
-      isHub: false, // Phase 3
-      hubPriority: this.config.hubPriority,
+      isHub: this.hubElection.isHub,
+      hubRole: hubConfig.role,
+      hubPriority: hubConfig.priority,
     }
   }
 
@@ -136,15 +226,43 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   }
 
   // ==========================================================================
-  // Hub (Phase 3 - stub for now)
+  // Hub Election
   // ==========================================================================
 
   getActiveHub(): PeerInfo | null {
-    return null // Phase 3
+    const state = this.hubElection.state
+    if (state.hubId === this.config.peerId) {
+      return this.getSelf()
+    }
+    return state.hub
   }
 
   isHub(): boolean {
-    return false // Phase 3
+    return this.hubElection.isHub
+  }
+
+  /**
+   * Get the current hub election state.
+   */
+  getHubState() {
+    return this.hubElection.state
+  }
+
+  /**
+   * Broadcast hub announcement to all connected peers.
+   */
+  private broadcastHubAnnouncement(): void {
+    const announcement = this.hubElection.createHubAnnouncement()
+    const msg = {
+      type: 'hub-announcement',
+      ...announcement,
+    }
+
+    for (const [peerId, socket] of this.connections) {
+      if (!socket.destroyed) {
+        socket.write(JSON.stringify(msg) + '\n')
+      }
+    }
   }
 
   // ==========================================================================
@@ -153,24 +271,92 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
 
   async registerNamespace(namespace: string): Promise<void> {
     this.namespaces.add(namespace)
-    // Phase 3: broadcast to hub
+
+    if (this.isHub()) {
+      // We're the hub - register directly
+      this.namespaceRegistry.registerPeer(namespace, this.config.peerId)
+    } else {
+      // Send registration to hub
+      this.sendNamespaceRegistration(namespace, 'register')
+    }
   }
 
   async unregisterNamespace(namespace: string): Promise<void> {
     this.namespaces.delete(namespace)
-    // Phase 3: notify hub
+
+    if (this.isHub()) {
+      // We're the hub - unregister directly
+      this.namespaceRegistry.unregisterPeer(namespace, this.config.peerId)
+    } else {
+      // Send unregistration to hub
+      this.sendNamespaceRegistration(namespace, 'unregister')
+    }
   }
 
   getActiveNamespaces(): Map<string, string[]> {
-    const result = new Map<string, string[]>()
+    // Use the namespace registry if we have synced data
+    const registryData = this.namespaceRegistry.getAllNamespaces()
+    if (registryData.size > 0) {
+      return registryData
+    }
 
-    // Add our own namespaces
+    // Fallback to local namespaces only (pre-sync or single node)
+    const result = new Map<string, string[]>()
     for (const ns of this.namespaces) {
       result.set(ns, [this.config.peerId])
     }
-
-    // Phase 3: aggregate from peers via hub
     return result
+  }
+
+  /**
+   * Get peers participating in a specific namespace.
+   */
+  getPeersForNamespace(namespace: string): string[] {
+    return this.namespaceRegistry.getPeersForNamespace(namespace)
+  }
+
+  /**
+   * Send namespace registration/unregistration to hub.
+   */
+  private sendNamespaceRegistration(
+    namespace: string,
+    action: 'register' | 'unregister'
+  ): void {
+    const hubId = this.hubElection.hubId
+    if (!hubId || hubId === this.config.peerId) return
+
+    const socket = this.connections.get(hubId)
+    if (!socket || socket.destroyed) return
+
+    const msg = {
+      type: action === 'register' ? 'namespace-register' : 'namespace-unregister',
+      namespace,
+      peerId: this.config.peerId,
+    }
+
+    socket.write(JSON.stringify(msg) + '\n')
+  }
+
+  /**
+   * Broadcast namespace update to all peers (hub-side).
+   */
+  private broadcastNamespaceUpdate(update: NamespaceUpdate): void {
+    for (const [peerId, socket] of this.connections) {
+      if (!socket.destroyed) {
+        socket.write(JSON.stringify(update) + '\n')
+      }
+    }
+  }
+
+  /**
+   * Send namespace snapshot to a specific peer (hub-side).
+   */
+  private sendNamespaceSnapshot(peerId: string): void {
+    const socket = this.connections.get(peerId)
+    if (!socket || socket.destroyed) return
+
+    const snapshot = this.namespaceRegistry.createSnapshot()
+    socket.write(JSON.stringify(snapshot) + '\n')
   }
 
   // ==========================================================================
@@ -343,19 +529,29 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   }
 
   private sendHandshake(socket: net.Socket): void {
+    const hubConfig = this.config.hub ?? DEFAULT_HUB_CONFIG
     const handshake = {
       type: 'handshake',
       peerId: this.config.peerId,
       peerName: this.config.peerName,
       groups: this.config.groups,
       namespaces: Array.from(this.namespaces),
+      hubRole: hubConfig.role,
+      hubPriority: hubConfig.priority,
     }
     socket.write(JSON.stringify(handshake) + '\n')
   }
 
   private handleHandshake(
     socket: net.Socket,
-    msg: { peerId: string; peerName?: string; groups?: string[]; namespaces?: string[] }
+    msg: {
+      peerId: string
+      peerName?: string
+      groups?: string[]
+      namespaces?: string[]
+      hubRole?: HubRole
+      hubPriority?: number
+    }
   ): void {
     const peerId = msg.peerId
 
@@ -374,6 +570,8 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
         groups: msg.groups ?? [],
         activeNamespaces: msg.namespaces ?? [],
         isHub: false,
+        hubRole: msg.hubRole,
+        hubPriority: msg.hubPriority,
       }
       this.peers.set(peerId, peer)
     } else {
@@ -382,12 +580,31 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       peer.name = msg.peerName ?? peer.name
       peer.groups = msg.groups ?? peer.groups
       peer.activeNamespaces = msg.namespaces ?? []
+      peer.hubRole = msg.hubRole ?? peer.hubRole
+      peer.hubPriority = msg.hubPriority ?? peer.hubPriority
     }
 
     this.connections.set(peerId, socket)
 
     // Send our handshake back
     this.sendHandshake(socket)
+
+    // Notify hub election of new peer
+    this.hubElection.peerJoined(peer)
+
+    // Register peer with health monitor
+    this.healthMonitor.registerPeer(peer)
+
+    // If we're hub, register peer's namespaces and send snapshot
+    if (this.isHub()) {
+      // Register namespaces the peer advertised in handshake
+      for (const ns of msg.namespaces ?? []) {
+        this.namespaceRegistry.registerPeer(ns, peerId)
+      }
+
+      // Send current namespace state to the new peer
+      this.sendNamespaceSnapshot(peerId)
+    }
 
     this.emit('peer:joined', peer)
   }
@@ -396,6 +613,17 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
     const peer = this.peers.get(peerId)
     if (peer) {
       peer.status = 'offline'
+
+      // Unregister from health monitor
+      this.healthMonitor.unregisterPeer(peerId)
+
+      // If we're hub, unregister peer from all namespaces
+      if (this.isHub()) {
+        this.namespaceRegistry.unregisterPeerFromAll(peerId)
+      }
+
+      // Notify hub election of peer leaving
+      this.hubElection.peerLeft(peer)
       this.emit('peer:left', peer)
     }
     this.connections.delete(peerId)
@@ -405,7 +633,63 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   // Internal: Message Handling
   // ==========================================================================
 
-  private handleMessage(fromPeerId: string, msg: WireMessage): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private handleMessage(fromPeerId: string, msg: any): void {
+    // Record traffic for health monitoring (any message counts as implicit heartbeat)
+    this.healthMonitor.recordTraffic(fromPeerId)
+
+    // Update peer lastSeen
+    const peer = this.peers.get(fromPeerId)
+    if (peer) {
+      peer.lastSeen = new Date()
+    }
+
+    // Handle ping messages
+    if (msg.type === 'ping') {
+      this.sendPong(fromPeerId)
+      return
+    }
+
+    // Handle pong messages
+    if (msg.type === 'pong') {
+      this.healthMonitor.recordPong(fromPeerId)
+      return
+    }
+
+    // Handle hub announcements
+    if (msg.type === 'hub-announcement') {
+      this.hubElection.receiveHubAnnouncement(fromPeerId, {
+        hubId: msg.hubId,
+        term: msg.term,
+      })
+      return
+    }
+
+    // Handle namespace registration (hub-side)
+    if (msg.type === 'namespace-register' && this.isHub()) {
+      this.namespaceRegistry.registerPeer(msg.namespace, msg.peerId)
+      return
+    }
+
+    // Handle namespace unregistration (hub-side)
+    if (msg.type === 'namespace-unregister' && this.isHub()) {
+      this.namespaceRegistry.unregisterPeer(msg.namespace, msg.peerId)
+      return
+    }
+
+    // Handle namespace updates (peer-side)
+    if (msg.type === 'namespace-update') {
+      this.namespaceRegistry.applyUpdate(msg as NamespaceUpdate)
+      return
+    }
+
+    // Handle namespace snapshot (peer-side)
+    if (msg.type === 'namespace-snapshot') {
+      this.namespaceRegistry.applySnapshot(msg as NamespaceSnapshot)
+      return
+    }
+
+    // Handle channel messages
     if (msg.type === 'message' && msg.channel) {
       const channel = this.channels.get(msg.channel)
       if (channel) {
@@ -454,5 +738,58 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
         socket.write(JSON.stringify(wireMsg) + '\n')
       }
     }
+  }
+
+  // ==========================================================================
+  // Health Monitoring
+  // ==========================================================================
+
+  /**
+   * Send a ping to a peer for health checking.
+   */
+  private sendPing(peerId: string): void {
+    const socket = this.connections.get(peerId)
+    if (!socket || socket.destroyed) return
+
+    const msg = {
+      type: 'ping',
+      timestamp: Date.now(),
+    }
+    socket.write(JSON.stringify(msg) + '\n')
+  }
+
+  /**
+   * Send a pong response to a peer.
+   */
+  private sendPong(peerId: string): void {
+    const socket = this.connections.get(peerId)
+    if (!socket || socket.destroyed) return
+
+    const msg = {
+      type: 'pong',
+      timestamp: Date.now(),
+    }
+    socket.write(JSON.stringify(msg) + '\n')
+  }
+
+  /**
+   * Get health status for all monitored peers.
+   */
+  getPeerHealth() {
+    return this.healthMonitor.getAllPeerHealth()
+  }
+
+  /**
+   * Get healthy (online) peer IDs.
+   */
+  getHealthyPeers(): string[] {
+    return this.healthMonitor.getHealthyPeers()
+  }
+
+  /**
+   * Check if the current hub is healthy.
+   */
+  isHubHealthy(): boolean {
+    return this.healthMonitor.isHubHealthy()
   }
 }

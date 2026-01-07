@@ -4,12 +4,14 @@
 import { EventEmitter } from 'events'
 import type { MessageChannelConfig, PeerInfo, ChannelStats } from '../types'
 import type { NebulaMesh } from '../mesh/nebula-mesh'
+import { OfflineQueue } from './offline-queue'
 
 export class MessageChannel<T = unknown> extends EventEmitter {
   readonly name: string
   private mesh: NebulaMesh
-  private config: MessageChannelConfig
+  private config: Required<MessageChannelConfig>
   private _open = false
+  private offlineQueue: OfflineQueue | null = null
   private stats: ChannelStats = {
     messagesSent: 0,
     messagesReceived: 0,
@@ -29,6 +31,16 @@ export class MessageChannel<T = unknown> extends EventEmitter {
       retryDelay: config?.retryDelay ?? 1000,
       timeout: config?.timeout ?? 30000,
     }
+
+    // Initialize offline queue if enabled
+    if (this.config.enableOfflineQueue) {
+      this.offlineQueue = new OfflineQueue({
+        ttl: this.config.offlineQueueTTL,
+        maxSize: this.config.maxQueueSize,
+        maxRetries: this.config.retryAttempts,
+        retryDelay: this.config.retryDelay,
+      })
+    }
   }
 
   // ==========================================================================
@@ -37,11 +49,26 @@ export class MessageChannel<T = unknown> extends EventEmitter {
 
   async open(): Promise<void> {
     if (this._open) return
+
+    if (this.offlineQueue) {
+      await this.offlineQueue.init()
+
+      // Listen for peer reconnection to flush queue
+      this.mesh.on('peer:joined', this.handlePeerJoined)
+    }
+
     this._open = true
   }
 
   async close(): Promise<void> {
     if (!this._open) return
+
+    this.mesh.off('peer:joined', this.handlePeerJoined)
+
+    if (this.offlineQueue) {
+      await this.offlineQueue.stop()
+    }
+
     this._open = false
     this.removeAllListeners()
   }
@@ -50,12 +77,28 @@ export class MessageChannel<T = unknown> extends EventEmitter {
     return this._open
   }
 
+  private handlePeerJoined = async (peer: PeerInfo): Promise<void> => {
+    if (!this.offlineQueue) return
+
+    // Flush queued messages to the reconnected peer
+    const ops = this.offlineQueue.getForPeer(peer.id)
+    for (const op of ops) {
+      const success = this.mesh._sendToPeer(peer.id, this.name, op.message)
+      if (success) {
+        this.offlineQueue.dequeue(op.id)
+        this.stats.messagesSent++
+        this.stats.queuedMessages--
+      }
+    }
+  }
+
   // ==========================================================================
   // Sending
   // ==========================================================================
 
   /**
-   * Send a message to a specific peer
+   * Send a message to a specific peer.
+   * If the peer is offline and queueing is enabled, the message will be queued.
    */
   send(peerId: string, message: T): boolean {
     if (!this._open) {
@@ -68,10 +111,42 @@ export class MessageChannel<T = unknown> extends EventEmitter {
       this.stats.messagesSent++
     } else {
       this.stats.failedDeliveries++
-      // Phase 3: queue for offline peer
+
+      // Queue for offline peer if enabled
+      if (this.offlineQueue) {
+        this.offlineQueue.enqueue(this.name, message, peerId)
+        this.stats.queuedMessages++
+      }
     }
 
     return success
+  }
+
+  /**
+   * Send a message to a specific peer, with automatic queueing if offline.
+   * Returns true if sent or queued, false only if queueing is disabled and send fails.
+   */
+  sendWithQueue(peerId: string, message: T): boolean {
+    if (!this._open) {
+      throw new Error(`Channel ${this.name} is not open`)
+    }
+
+    const success = this.mesh._sendToPeer(peerId, this.name, message)
+
+    if (success) {
+      this.stats.messagesSent++
+      return true
+    }
+
+    // Queue for offline peer if enabled
+    if (this.offlineQueue) {
+      this.offlineQueue.enqueue(this.name, message, peerId)
+      this.stats.queuedMessages++
+      return true // Queued counts as success
+    }
+
+    this.stats.failedDeliveries++
+    return false
   }
 
   /**

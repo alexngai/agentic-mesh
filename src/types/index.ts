@@ -1,6 +1,44 @@
 // agentic-mesh type definitions
 
 // =============================================================================
+// Hub Election Types
+// =============================================================================
+
+/**
+ * Hub roles define the permission level for hub election.
+ * Higher roles have priority in hub election.
+ * Roles are per-server and determined by deployment configuration.
+ */
+export enum HubRole {
+  /** Cannot become hub - read-only participant */
+  MEMBER = 0,
+  /** Can become hub if no higher-priority peers available */
+  COORDINATOR = 1,
+  /** Preferred hub role - highest priority */
+  ADMIN = 2,
+}
+
+export interface HubConfig {
+  /** Role for this peer in hub election */
+  role: HubRole
+  /** Tiebreaker within same role (higher = more preferred) */
+  priority?: number
+  /** List of peer IDs that can become hub (if empty, all peers can) */
+  candidates?: string[]
+}
+
+export interface HubState {
+  /** Current hub peer ID (null if no hub elected) */
+  hubId: string | null
+  /** Hub peer info */
+  hub: PeerInfo | null
+  /** Election term/epoch for consistency */
+  term: number
+  /** Timestamp of last election */
+  electedAt: Date | null
+}
+
+// =============================================================================
 // Peer Types
 // =============================================================================
 
@@ -16,6 +54,7 @@ export interface PeerInfo {
   groups: string[]
   activeNamespaces: string[]
   isHub: boolean
+  hubRole?: HubRole
   hubPriority?: number
 }
 
@@ -43,8 +82,7 @@ export interface NebulaMeshConfig {
   groups?: string[]
 
   // Hub configuration (Phase 3)
-  hubPriority?: number
-  hubCandidates?: string[]
+  hub?: HubConfig
 
   // Timeouts
   connectionTimeout?: number // Default: 30000ms
@@ -174,6 +212,7 @@ export type MeshEventType =
   | 'peer:joined'
   | 'peer:left'
   | 'peer:updated'
+  | 'peer:health'
   | 'hub:changed'
   | 'error'
 

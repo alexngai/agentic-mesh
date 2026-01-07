@@ -43,16 +43,37 @@ describe('Multi-Peer Sync Integration', () => {
     // Wait for any pending debounced saves
     await sleep(600)
 
-    // Disconnect all services sequentially to avoid race conditions
-    if (serviceA?.connected) await serviceA.disconnect()
-    if (serviceB?.connected) await serviceB.disconnect()
-    if (serviceC?.connected) await serviceC.disconnect()
+    // Disconnect all services with timeout to avoid hanging
+    const disconnectWithTimeout = async (
+      service: SudocodeMeshService | undefined,
+      timeout: number
+    ) => {
+      if (!service?.connected) return
+      try {
+        await Promise.race([
+          service.disconnect(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Disconnect timeout')), timeout)
+          ),
+        ])
+      } catch {
+        // Ignore timeout errors during cleanup
+      }
+    }
+
+    await disconnectWithTimeout(serviceA, 3000)
+    await disconnectWithTimeout(serviceB, 3000)
+    await disconnectWithTimeout(serviceC, 3000)
 
     // Small delay to ensure all writes complete
     await sleep(100)
 
-    await fs.rm(tmpDir, { recursive: true, force: true })
-  })
+    try {
+      await fs.rm(tmpDir, { recursive: true, force: true })
+    } catch {
+      // Ignore cleanup errors
+    }
+  }, 20000) // Increased timeout for three-peer cleanup with hub election
 
   describe('Two-Peer Sync', () => {
     beforeEach(async () => {

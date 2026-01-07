@@ -20,6 +20,7 @@ import type {
 } from './types'
 import { EntityMapper } from './mapper'
 import { JSONLBridge } from './jsonl-bridge'
+import { GitReconciler, ReconcileEvent } from './git-reconciler'
 
 const DEFAULT_SAVE_DEBOUNCE_MS = 500
 
@@ -29,6 +30,7 @@ export class SudocodeMeshService extends EventEmitter {
   private provider: YjsSyncProvider | null = null
   private mapper: EntityMapper
   private bridge: JSONLBridge
+  private gitReconciler: GitReconciler | null = null
   private saveDebounceTimer: NodeJS.Timeout | null = null
   private _connected = false
 
@@ -89,8 +91,31 @@ export class SudocodeMeshService extends EventEmitter {
       this.emit('synced')
     })
 
+    // Start git reconciler for "git wins" behavior
+    this.gitReconciler = new GitReconciler({
+      projectPath: this.config.projectPath,
+      autoStart: true,
+    })
+
+    this.gitReconciler.on('reconcile', async (event: ReconcileEvent) => {
+      await this.handleGitChange(event)
+    })
+
     this._connected = true
     this.emit('connected')
+  }
+
+  /**
+   * Handle git-induced file changes.
+   * Implements "git wins" reconciliation.
+   */
+  private async handleGitChange(event: ReconcileEvent): Promise<void> {
+    this.emit('git:change', event)
+
+    // Reconcile CRDT from JSONL (git wins)
+    await this.reconcileFromJSONL()
+
+    this.emit('git:reconciled', event)
   }
 
   async disconnect(): Promise<void> {
@@ -100,6 +125,12 @@ export class SudocodeMeshService extends EventEmitter {
     if (this.saveDebounceTimer) {
       clearTimeout(this.saveDebounceTimer)
       this.saveDebounceTimer = null
+    }
+
+    // Stop git reconciler
+    if (this.gitReconciler) {
+      this.gitReconciler.stop()
+      this.gitReconciler = null
     }
 
     // Save final state
@@ -467,6 +498,27 @@ export class SudocodeMeshService extends EventEmitter {
       feedback: this.getAllFeedback(),
     }
 
+    // Tell git reconciler to ignore this write (we're the source)
+    if (this.gitReconciler) {
+      this.gitReconciler.ignoreNextWrite()
+    }
+
     await this.bridge.saveToJSONL(state)
+
+    // Update hashes so reconciler knows current state
+    if (this.gitReconciler) {
+      this.gitReconciler.updateAllHashes()
+    }
+  }
+
+  /**
+   * Manually trigger git reconciliation check.
+   * Useful after operations like git pull, git checkout, etc.
+   */
+  async checkForGitChanges(): Promise<boolean> {
+    if (!this.gitReconciler) return false
+
+    const event = await this.gitReconciler.checkAndReconcile()
+    return event !== null
   }
 }

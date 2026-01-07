@@ -5,6 +5,8 @@ export { SudocodeMeshService } from './service'
 export { EntityMapper } from './mapper'
 export { JSONLBridge } from './jsonl-bridge'
 export type { SudocodeState } from './jsonl-bridge'
+export { GitReconciler } from './git-reconciler'
+export type { GitReconcilerConfig, FileHashState, ReconcileEvent } from './git-reconciler'
 
 // Re-export types
 export type {

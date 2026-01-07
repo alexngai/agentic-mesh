@@ -3,7 +3,10 @@
 
 // Core exports
 export { NebulaMesh } from './mesh'
-export { MessageChannel } from './channel'
+export { HealthMonitor } from './mesh/health-monitor'
+export type { HealthMonitorConfig, PeerHealth, HealthChangeEvent } from './mesh/health-monitor'
+export { MessageChannel, OfflineQueue } from './channel'
+export type { QueuedOperation, OfflineQueueConfig } from './channel'
 export { SyncProvider, YjsSyncProvider } from './sync'
 
 // Integrations
@@ -11,6 +14,9 @@ export * from './integrations'
 
 // Type exports
 export type {
+  // Hub types
+  HubConfig,
+  HubState,
   // Peer types
   PeerStatus,
   PeerInfo,
@@ -35,3 +41,6 @@ export type {
   ChannelEventType,
   SyncEventType,
 } from './types'
+
+// Enum exports (enums need value export, not just type)
+export { HubRole } from './types'
