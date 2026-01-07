@@ -19,6 +19,7 @@
     "build": "tsup src/index.ts --format cjs,esm --dts",
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
     "lint": "tsc --noEmit",
+    "demo": "tsx examples/basic-sync.ts",
     "prepublishOnly": "npm run build",
     "publish:npm": "npm publish"
   },
@@ -34,7 +35,15 @@
   },
   "homepage": "https://github.com/alexngai/agentic-mesh#readme",
   "devDependencies": {
+    "@types/node": "^25.0.3",
+    "ts-node": "^10.9.2",
     "tsup": "^8.0.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "lib0": "^0.2.117",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.29"
   }
 }

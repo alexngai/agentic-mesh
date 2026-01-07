@@ -1,0 +1,3 @@
+[submodule "references/sudocode"]
+	path = references/sudocode
+	url = https://github.com/sudocode-ai/sudocode.git
