@@ -10,6 +10,7 @@ import type {
   MeshContext,
   WireMessage,
   HubConfig,
+  NebulaAutoConfigOptions,
 } from '../types'
 import { HubRole } from '../types'
 import { MessageChannel } from '../channel/message-channel'
@@ -20,6 +21,17 @@ import {
   NamespaceSnapshot,
 } from './namespace-registry'
 import { HealthMonitor, HealthChangeEvent } from './health-monitor'
+import { SerializerManager, type SerializerCapabilities } from '../channel/serializers'
+import {
+  parseNebulaSetup,
+  type NebulaSetup,
+} from './nebula-config-parser'
+import {
+  PeerDiscovery,
+  type DiscoveryMessage,
+  type DiscoveryPeerInfo,
+  discoveryPeerToPeerConfig,
+} from './peer-discovery'
 
 const DEFAULT_PORT = 7946
 const DEFAULT_CONNECTION_TIMEOUT = 30000
@@ -45,6 +57,12 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   private hubElection: HubElection
   private namespaceRegistry: NamespaceRegistry
   private healthMonitor: HealthMonitor
+  private serializer: SerializerManager
+
+  // Phase 7.2: Peer Discovery
+  private peerDiscovery: PeerDiscovery | null = null
+  private discoveryChannel: MessageChannel<DiscoveryMessage> | null = null
+  private nebulaSetup: NebulaSetup | null = null
 
   constructor(config: NebulaMeshConfig) {
     super()
@@ -69,6 +87,12 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
     const healthCheckInterval = config.healthCheckInterval ?? DEFAULT_HEALTH_CHECK_INTERVAL
     this.healthMonitor = new HealthMonitor({
       heartbeatInterval: healthCheckInterval,
+    })
+
+    // Initialize serializer manager
+    this.serializer = new SerializerManager({
+      format: config.serialization ?? 'auto',
+      compression: config.compressionEnabled ?? true,
     })
 
     // Handle health monitor events
@@ -119,6 +143,117 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   }
 
   // ==========================================================================
+  // Static Factory: fromNebulaConfig (Phase 7.2)
+  // ==========================================================================
+
+  /**
+   * Create a NebulaMesh instance from an existing Nebula configuration file.
+   *
+   * This factory method:
+   * - Parses the nebula config.yaml file
+   * - Extracts PKI paths and lighthouse configuration
+   * - Parses the certificate to get Nebula IP and groups
+   * - Auto-configures the mesh based on lighthouse settings
+   *
+   * @param configPath Path to nebula config.yaml (supports ~ for home dir)
+   * @param options Additional configuration options
+   * @returns Configured NebulaMesh instance
+   *
+   * @example
+   * ```typescript
+   * const mesh = await NebulaMesh.fromNebulaConfig('~/.nebula/config.yaml', {
+   *   peerId: 'alice',
+   *   enableDiscovery: true,
+   * })
+   *
+   * await mesh.connect()
+   * mesh.startPeerDiscovery()  // Start discovering peers via lighthouses
+   * ```
+   */
+  static async fromNebulaConfig(
+    configPath: string,
+    options: NebulaAutoConfigOptions
+  ): Promise<NebulaMesh> {
+    // Parse Nebula configuration and certificate
+    const setup = await parseNebulaSetup(configPath, {
+      nebulaCertPath: options.nebulaCertPath,
+    })
+
+    // Extract lighthouse peer configs from static_host_map
+    const lighthousePeers: PeerConfig[] = []
+    const lighthousePeerIds: string[] = []
+
+    for (const [nebulaIp, endpoints] of setup.config.lighthouse.hosts) {
+      // Generate a peer ID from the Nebula IP
+      const peerId = `lighthouse-${nebulaIp.replace(/[./]/g, '-')}`
+      lighthousePeerIds.push(peerId)
+
+      lighthousePeers.push({
+        id: peerId,
+        nebulaIp: nebulaIp.split('/')[0], // Remove CIDR if present
+        name: `Lighthouse ${nebulaIp}`,
+        port: options.port ?? DEFAULT_PORT,
+      })
+    }
+
+    // Create mesh config
+    const meshConfig: NebulaMeshConfig = {
+      peerId: options.peerId,
+      peerName: options.peerName ?? options.peerId,
+      nebulaIp: setup.cert.nebulaIp.split('/')[0], // Remove CIDR
+      peers: lighthousePeers,
+      groups: setup.cert.groups,
+      hub: options.hub ?? {
+        role: setup.config.isLighthouse ? HubRole.COORDINATOR : HubRole.MEMBER,
+        priority: setup.config.isLighthouse ? 10 : 0,
+      },
+      port: options.port ?? DEFAULT_PORT,
+    }
+
+    // Create mesh instance
+    const mesh = new NebulaMesh(meshConfig)
+
+    // Store setup for discovery
+    mesh.nebulaSetup = setup
+
+    // Set up peer discovery if enabled
+    if (options.enableDiscovery !== false) {
+      mesh.peerDiscovery = new PeerDiscovery({
+        peerId: options.peerId,
+        peerName: options.peerName,
+        nebulaIp: setup.cert.nebulaIp.split('/')[0],
+        port: options.port ?? DEFAULT_PORT,
+        groups: setup.cert.groups,
+        lighthousePeerIds,
+        pollInterval: options.discoveryInterval ?? 30000,
+        isLighthouse: setup.config.isLighthouse,
+      })
+
+      // Forward discovery events
+      mesh.peerDiscovery.on('peer:discovered', (peer: DiscoveryPeerInfo) => {
+        mesh.handleDiscoveredPeer(peer)
+      })
+
+      mesh.peerDiscovery.on('peer:lost', (peer: DiscoveryPeerInfo) => {
+        mesh.emit('peer:discovery:lost', peer)
+      })
+
+      mesh.peerDiscovery.on('discovery:error', (error: unknown) => {
+        mesh.emit('discovery:error', error)
+      })
+    }
+
+    return mesh
+  }
+
+  /**
+   * Get the Nebula setup info (if created via fromNebulaConfig).
+   */
+  getNebulaSetup(): NebulaSetup | null {
+    return this.nebulaSetup
+  }
+
+  // ==========================================================================
   // Lifecycle
   // ==========================================================================
 
@@ -148,6 +283,11 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
 
     // Mark as disconnecting to suppress errors during shutdown
     this._disconnecting = true
+
+    // Stop peer discovery
+    if (this.peerDiscovery?.running) {
+      await this.stopPeerDiscovery()
+    }
 
     // Stop health monitoring
     this.healthMonitor.stop()
@@ -541,6 +681,8 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       namespaces: Array.from(this.namespaces),
       hubRole: hubConfig.role,
       hubPriority: hubConfig.priority,
+      // Phase 6.2: Serialization capabilities
+      serialization: this.serializer.getCapabilities(),
     }
     socket.write(JSON.stringify(handshake) + '\n')
   }
@@ -554,6 +696,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       namespaces?: string[]
       hubRole?: HubRole
       hubPriority?: number
+      serialization?: SerializerCapabilities
     }
   ): void {
     const peerId = msg.peerId
@@ -589,6 +732,13 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
 
     this.connections.set(peerId, socket)
 
+    // Phase 6.2: Negotiate serialization format
+    const remoteCapabilities = msg.serialization ?? {
+      supportedFormats: ['json'] as ('json' | 'binary')[],
+      compressionSupported: false,
+    }
+    this.serializer.negotiateFormat(peerId, remoteCapabilities)
+
     // Send our handshake back
     this.sendHandshake(socket)
 
@@ -619,6 +769,9 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
 
       // Unregister from health monitor
       this.healthMonitor.unregisterPeer(peerId)
+
+      // Clean up serializer format cache
+      this.serializer.removePeer(peerId)
 
       // If we're hub, unregister peer from all namespaces
       if (this.isHub()) {
@@ -693,12 +846,20 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
     }
 
     // Handle channel messages
-    if (msg.type === 'message' && msg.channel) {
+    if (msg.channel) {
       const channel = this.channels.get(msg.channel)
       if (channel) {
         const peer = this.peers.get(fromPeerId)
         if (peer) {
-          channel._receiveMessage(msg.payload, peer)
+          if (msg.type === 'message') {
+            channel._receiveMessage(msg.payload, peer)
+          } else if (msg.type === 'request' && msg.requestId) {
+            // RPC request - delegate to channel's request handler
+            channel._receiveRequest(msg.payload, peer, msg.requestId)
+          } else if (msg.type === 'response' && msg.requestId) {
+            // RPC response - resolve pending request
+            channel._receiveResponse(msg.payload, peer, msg.requestId)
+          }
         }
       }
     }
@@ -740,6 +901,146 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
         }
         socket.write(JSON.stringify(wireMsg) + '\n')
       }
+    }
+  }
+
+  /** @internal - Used by MessageChannel for RPC */
+  _sendRpc<T>(
+    peerId: string,
+    channelName: string,
+    message: T,
+    type: 'request' | 'response',
+    requestId: string
+  ): boolean {
+    const socket = this.connections.get(peerId)
+    if (!socket || socket.destroyed) {
+      return false
+    }
+
+    const wireMsg: WireMessage<T> = {
+      id: crypto.randomUUID(),
+      channel: channelName,
+      type,
+      payload: message,
+      from: this.config.peerId,
+      to: peerId,
+      timestamp: Date.now(),
+      requestId,
+    }
+
+    socket.write(JSON.stringify(wireMsg) + '\n')
+    return true
+  }
+
+  /** @internal - Used by MessageChannel for request ID generation */
+  _getPeerId(): string {
+    return this.config.peerId
+  }
+
+  // ==========================================================================
+  // Peer Discovery (Phase 7.2)
+  // ==========================================================================
+
+  /**
+   * Start peer discovery via lighthouses.
+   *
+   * This requires the mesh to be created with `fromNebulaConfig()` with
+   * `enableDiscovery: true` (the default).
+   *
+   * @param pollInterval Optional interval override in ms (default: from config)
+   */
+  async startPeerDiscovery(pollInterval?: number): Promise<void> {
+    if (!this.peerDiscovery) {
+      throw new Error(
+        'Peer discovery not available. Create mesh with fromNebulaConfig() and enableDiscovery: true'
+      )
+    }
+
+    if (this.peerDiscovery.running) {
+      return
+    }
+
+    // Create discovery channel
+    this.discoveryChannel = this.createChannel<DiscoveryMessage>('discovery:peers')
+
+    // Start discovery
+    await this.peerDiscovery.start(this.discoveryChannel)
+  }
+
+  /**
+   * Stop peer discovery.
+   */
+  async stopPeerDiscovery(): Promise<void> {
+    if (!this.peerDiscovery || !this.peerDiscovery.running) {
+      return
+    }
+
+    await this.peerDiscovery.stop()
+
+    if (this.discoveryChannel) {
+      await this.discoveryChannel.close()
+      this.discoveryChannel = null
+    }
+  }
+
+  /**
+   * Manually trigger peer discovery.
+   * Returns the list of discovered peers.
+   *
+   * @param namespace Optional namespace filter
+   */
+  async discoverPeers(namespace?: string): Promise<DiscoveryPeerInfo[]> {
+    if (!this.peerDiscovery) {
+      throw new Error('Peer discovery not available')
+    }
+
+    return this.peerDiscovery.discoverPeers(namespace)
+  }
+
+  /**
+   * Get discovered peers.
+   */
+  getDiscoveredPeers(): DiscoveryPeerInfo[] {
+    if (!this.peerDiscovery) {
+      return []
+    }
+    return this.peerDiscovery.getDiscoveredPeers()
+  }
+
+  /**
+   * Whether peer discovery is running.
+   */
+  get discoveryRunning(): boolean {
+    return this.peerDiscovery?.running ?? false
+  }
+
+  /**
+   * Handle a discovered peer - add to peers if not already known.
+   */
+  private handleDiscoveredPeer(peer: DiscoveryPeerInfo): void {
+    const existing = this.peers.get(peer.id)
+
+    if (!existing) {
+      // Add as new peer
+      const peerConfig = discoveryPeerToPeerConfig(peer)
+      const peerInfo = this.peerConfigToInfo(peerConfig)
+      peerInfo.groups = peer.groups
+      peerInfo.activeNamespaces = peer.namespaces
+      this.peers.set(peer.id, peerInfo)
+      this.emit('peer:discovered', peerInfo)
+
+      // Attempt to connect if mesh is connected
+      if (this._connected) {
+        this.connectToPeer(peerInfo).catch(() => {
+          // Connection failures are expected for unreachable peers
+        })
+      }
+    } else {
+      // Update existing peer info
+      existing.name = peer.name ?? existing.name
+      existing.groups = peer.groups
+      existing.activeNamespaces = peer.namespaces
+      this.emit('peer:updated', existing)
     }
   }
 

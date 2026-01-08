@@ -6,6 +6,37 @@ import type { MessageChannelConfig, PeerInfo, ChannelStats } from '../types'
 import type { NebulaMesh } from '../mesh/nebula-mesh'
 import { OfflineQueue } from './offline-queue'
 
+// Error types for RPC
+export class RPCTimeoutError extends Error {
+  constructor(
+    public readonly requestId: string,
+    public readonly timeout: number
+  ) {
+    super(`RPC request ${requestId} timed out after ${timeout}ms`)
+    this.name = 'RPCTimeoutError'
+  }
+}
+
+export class RPCError extends Error {
+  constructor(
+    public readonly requestId: string,
+    public readonly originalMessage: string
+  ) {
+    super(`RPC error for request ${requestId}: ${originalMessage}`)
+    this.name = 'RPCError'
+  }
+}
+
+// Pending request tracking
+interface PendingRequest {
+  resolve: (response: unknown) => void
+  reject: (error: Error) => void
+  timer: NodeJS.Timeout
+}
+
+// Request handler type
+type RequestHandler<T> = (message: T, from: PeerInfo) => Promise<unknown>
+
 export class MessageChannel<T = unknown> extends EventEmitter {
   readonly name: string
   private mesh: NebulaMesh
@@ -21,6 +52,11 @@ export class MessageChannel<T = unknown> extends EventEmitter {
     failedDeliveries: 0,
     permissionDenied: 0,
   }
+
+  // RPC support
+  private pendingRequests: Map<string, PendingRequest> = new Map()
+  private requestHandler: RequestHandler<T> | null = null
+  private requestCounter = 0
 
   constructor(mesh: NebulaMesh, name: string, config?: MessageChannelConfig) {
     super()
@@ -68,6 +104,14 @@ export class MessageChannel<T = unknown> extends EventEmitter {
     if (!this._open) return
 
     this.mesh.off('peer:joined', this.handlePeerJoined)
+
+    // Cancel all pending RPC requests
+    for (const [requestId, pending] of this.pendingRequests) {
+      clearTimeout(pending.timer)
+      pending.reject(new Error(`Channel ${this.name} closed while request ${requestId} pending`))
+    }
+    this.pendingRequests.clear()
+    this.requestHandler = null
 
     if (this.offlineQueue) {
       await this.offlineQueue.stop()
@@ -179,6 +223,82 @@ export class MessageChannel<T = unknown> extends EventEmitter {
   }
 
   // ==========================================================================
+  // RPC (Request/Response)
+  // ==========================================================================
+
+  /**
+   * Send a request and wait for a response.
+   * @param peerId Target peer to send request to
+   * @param message Request message
+   * @param timeout Timeout in ms (default: from config, typically 30000)
+   * @returns Response from peer
+   * @throws RPCTimeoutError if no response within timeout
+   * @throws RPCError if handler returns an error
+   */
+  request<R>(peerId: string, message: T, timeout?: number): Promise<R> {
+    if (!this._open) {
+      return Promise.reject(new Error(`Channel ${this.name} is not open`))
+    }
+
+    const requestId = this.generateRequestId()
+    const timeoutMs = timeout ?? this.config.timeout
+
+    return new Promise<R>((resolve, reject) => {
+      // Set up timeout
+      const timer = setTimeout(() => {
+        this.pendingRequests.delete(requestId)
+        reject(new RPCTimeoutError(requestId, timeoutMs))
+      }, timeoutMs)
+
+      // Store pending request
+      this.pendingRequests.set(requestId, {
+        resolve: resolve as (response: unknown) => void,
+        reject,
+        timer,
+      })
+
+      // Send the request
+      const success = this.mesh._sendRpc(peerId, this.name, message, 'request', requestId)
+
+      if (!success) {
+        clearTimeout(timer)
+        this.pendingRequests.delete(requestId)
+        reject(new Error(`Failed to send request to peer ${peerId}`))
+      }
+
+      this.stats.messagesSent++
+    })
+  }
+
+  /**
+   * Register a handler for incoming requests.
+   * The handler receives the request message and peer info, and returns a response.
+   * Only one handler can be registered per channel.
+   * @param handler Async function that processes requests and returns responses
+   */
+  onRequest(handler: (message: T, from: PeerInfo) => Promise<unknown>): void {
+    this.requestHandler = handler
+  }
+
+  /**
+   * Remove the request handler.
+   */
+  offRequest(): void {
+    this.requestHandler = null
+  }
+
+  /**
+   * Check if a request handler is registered.
+   */
+  hasRequestHandler(): boolean {
+    return this.requestHandler !== null
+  }
+
+  private generateRequestId(): string {
+    return `${this.mesh._getPeerId()}:${this.name}:${++this.requestCounter}`
+  }
+
+  // ==========================================================================
   // Receiving (called by NebulaMesh)
   // ==========================================================================
 
@@ -198,6 +318,83 @@ export class MessageChannel<T = unknown> extends EventEmitter {
 
     this.stats.messagesReceived++
     this.emit('message', message, from)
+  }
+
+  /** @internal - Called by NebulaMesh when an RPC request arrives */
+  async _receiveRequest(message: T, from: PeerInfo, requestId: string): Promise<void> {
+    // Check permission
+    if (!this.checkSenderPermission(from)) {
+      this.stats.permissionDenied++
+      // Send error response
+      this.mesh._sendRpc(
+        from.id,
+        this.name,
+        { error: 'Permission denied', code: 'PERMISSION_DENIED' } as unknown as T,
+        'response',
+        requestId
+      )
+      return
+    }
+
+    this.stats.messagesReceived++
+
+    // Check if handler is registered
+    if (!this.requestHandler) {
+      // Send error response - no handler
+      this.mesh._sendRpc(
+        from.id,
+        this.name,
+        { error: 'No handler registered', code: 'NO_HANDLER' } as unknown as T,
+        'response',
+        requestId
+      )
+      return
+    }
+
+    try {
+      // Call handler and get response
+      const response = await this.requestHandler(message, from)
+
+      // Send response
+      this.mesh._sendRpc(from.id, this.name, response as T, 'response', requestId)
+      this.stats.messagesSent++
+    } catch (err) {
+      // Send error response
+      const errorMessage = err instanceof Error ? err.message : String(err)
+      this.mesh._sendRpc(
+        from.id,
+        this.name,
+        { error: errorMessage, code: 'HANDLER_ERROR' } as unknown as T,
+        'response',
+        requestId
+      )
+      this.stats.messagesSent++
+    }
+  }
+
+  /** @internal - Called by NebulaMesh when an RPC response arrives */
+  _receiveResponse(response: unknown, from: PeerInfo, requestId: string): void {
+    const pending = this.pendingRequests.get(requestId)
+    if (!pending) {
+      // Response for unknown request (possibly timed out already)
+      return
+    }
+
+    // Clear timeout and remove from pending
+    clearTimeout(pending.timer)
+    this.pendingRequests.delete(requestId)
+
+    this.stats.messagesReceived++
+
+    // Check for error response
+    const maybeError = response as { error?: string; code?: string }
+    if (maybeError && typeof maybeError === 'object' && 'error' in maybeError && 'code' in maybeError) {
+      pending.reject(new RPCError(requestId, maybeError.error as string))
+      return
+    }
+
+    // Success - resolve with response
+    pending.resolve(response)
   }
 
   // ==========================================================================

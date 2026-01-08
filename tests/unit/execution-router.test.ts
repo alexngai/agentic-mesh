@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { NebulaMesh } from '../../src/mesh/nebula-mesh'
+import { EventEmitter } from 'events'
 import {
   ExecutionRouter,
   ExecutionRequestEvent,
@@ -8,45 +8,206 @@ import {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+// Global channel registry for cross-mesh communication
+const channelRegistry = new Map<string, Map<string, MockMessageChannel>>()
+
+// Mock MessageChannel for execution router
+class MockMessageChannel extends EventEmitter {
+  private _opened = false
+  private namespace: string
+  private mesh: MockNebulaMesh
+
+  constructor(mesh: MockNebulaMesh, namespace: string) {
+    super()
+    this.mesh = mesh
+    this.namespace = namespace
+  }
+
+  async open(): Promise<void> {
+    this._opened = true
+    // Register in global registry
+    if (!channelRegistry.has(this.namespace)) {
+      channelRegistry.set(this.namespace, new Map())
+    }
+    channelRegistry.get(this.namespace)!.set(this.mesh.peerId, this)
+  }
+
+  async close(): Promise<void> {
+    this._opened = false
+    channelRegistry.get(this.namespace)?.delete(this.mesh.peerId)
+  }
+
+  get opened(): boolean {
+    return this._opened
+  }
+
+  send(peerId: string, message: unknown): boolean {
+    const targetChannel = channelRegistry.get(this.namespace)?.get(peerId)
+    if (targetChannel) {
+      const from = {
+        id: this.mesh.peerId,
+        groups: this.mesh.groups,
+        status: 'online',
+      }
+      setImmediate(() => targetChannel.emit('message', message, from))
+      return true
+    }
+    return false
+  }
+
+  broadcast(message: unknown): void {
+    const channels = channelRegistry.get(this.namespace)
+    if (channels) {
+      const from = {
+        id: this.mesh.peerId,
+        groups: this.mesh.groups,
+        status: 'online',
+      }
+      for (const [peerId, channel] of channels) {
+        if (peerId !== this.mesh.peerId) {
+          setImmediate(() => channel.emit('message', message, from))
+        }
+      }
+    }
+  }
+
+  async request<R>(peerId: string, message: unknown, _timeout?: number): Promise<R> {
+    return new Promise((resolve, reject) => {
+      const targetChannel = channelRegistry.get(this.namespace)?.get(peerId)
+      if (!targetChannel) {
+        reject(new Error('Peer not found'))
+        return
+      }
+
+      const requestId = Math.random().toString(36).slice(2)
+      const from = {
+        id: this.mesh.peerId,
+        groups: this.mesh.groups,
+        status: 'online',
+      }
+
+      // Send to target and expect response
+      setImmediate(() => targetChannel.emit('message', message, from))
+
+      // For simplicity, just resolve with the message (tests will handle response)
+      setTimeout(() => reject(new Error('Request timed out')), _timeout || 5000)
+    })
+  }
+}
+
+// Mock NebulaMesh to avoid creating real network connections
+class MockNebulaMesh extends EventEmitter {
+  config: { peerId: string; groups?: string[] }
+  _connected = false
+  private peers = new Map<string, { id: string; status: string; groups: string[] }>()
+  private channels = new Map<string, MockMessageChannel>()
+  private otherMesh: MockNebulaMesh | null = null
+
+  constructor(config: { peerId: string; peers?: { id: string }[]; groups?: string[] }) {
+    super()
+    this.config = config
+    // Pre-populate peers from config
+    if (config.peers) {
+      for (const p of config.peers) {
+        this.peers.set(p.id, { id: p.id, status: 'online', groups: [] })
+      }
+    }
+  }
+
+  async connect() {
+    this._connected = true
+  }
+
+  async disconnect() {
+    this._connected = false
+    // Close all channels
+    for (const channel of this.channels.values()) {
+      await channel.close()
+    }
+  }
+
+  get connected() {
+    return this._connected
+  }
+
+  get peerId() {
+    return this.config.peerId
+  }
+
+  get groups() {
+    return this.config.groups || []
+  }
+
+  // Link two mock meshes for bidirectional communication
+  linkTo(other: MockNebulaMesh) {
+    this.otherMesh = other
+    other.otherMesh = this
+    // Update peer info with groups
+    this.peers.set(other.peerId, { id: other.peerId, status: 'online', groups: other.groups })
+    other.peers.set(this.peerId, { id: this.peerId, status: 'online', groups: this.groups })
+  }
+
+  getPeer(peerId: string) {
+    return this.peers.get(peerId)
+  }
+
+  getPeers() {
+    return Array.from(this.peers.values())
+  }
+
+  getOnlinePeers() {
+    return Array.from(this.peers.values()).filter((p) => p.status === 'online')
+  }
+
+  createChannel<T>(namespace: string): MockMessageChannel {
+    if (!this.channels.has(namespace)) {
+      this.channels.set(namespace, new MockMessageChannel(this, namespace))
+    }
+    return this.channels.get(namespace)!
+  }
+
+  getActiveNamespaces() {
+    return new Map()
+  }
+}
+
+// Use the mock instead of real NebulaMesh
+type NebulaMesh = MockNebulaMesh
+
 describe('ExecutionRouter', () => {
   let meshA: NebulaMesh
   let meshB: NebulaMesh
   let routerA: ExecutionRouter
   let routerB: ExecutionRouter
-  let basePort: number
 
   beforeEach(async () => {
-    basePort = 19200 + Math.floor(Math.random() * 1000)
-
-    meshA = new NebulaMesh({
+    meshA = new MockNebulaMesh({
       peerId: 'peer-a',
-      nebulaIp: '127.0.0.1',
-      port: basePort,
-      peers: [{ id: 'peer-b', nebulaIp: '127.0.0.1', port: basePort + 1 }],
+      peers: [{ id: 'peer-b' }],
       groups: ['admin', 'developers'],
     })
 
-    meshB = new NebulaMesh({
+    meshB = new MockNebulaMesh({
       peerId: 'peer-b',
-      nebulaIp: '127.0.0.1',
-      port: basePort + 1,
-      peers: [{ id: 'peer-a', nebulaIp: '127.0.0.1', port: basePort }],
+      peers: [{ id: 'peer-a' }],
       groups: ['developers'],
     })
 
-    // Connect both simultaneously and wait for sync
+    // Link the mock meshes for bidirectional communication
+    meshA.linkTo(meshB)
+
+    // Connect both
     await Promise.all([meshA.connect(), meshB.connect()])
-    await sleep(200) // Wait for peer handshakes
   })
 
   afterEach(async () => {
     if (routerA) routerA.cancelAll()
     if (routerB) routerB.cancelAll()
 
-    await Promise.race([
-      Promise.all([meshA?.disconnect(), meshB?.disconnect()]),
-      sleep(2000), // Timeout for disconnect
-    ])
+    await Promise.all([meshA?.disconnect(), meshB?.disconnect()])
+
+    // Clear channel registry to avoid cross-test contamination
+    channelRegistry.clear()
   })
 
   describe('initialization', () => {

@@ -1,6 +1,27 @@
 // agentic-mesh type definitions
 
 // =============================================================================
+// Discovery Types (Phase 7.2)
+// =============================================================================
+
+export interface NebulaAutoConfigOptions {
+  /** Local peer ID (required) */
+  peerId: string
+  /** Local peer name (optional, defaults to peerId) */
+  peerName?: string
+  /** Hub configuration override */
+  hub?: HubConfig
+  /** Port for mesh communication (default: 7946) */
+  port?: number
+  /** Enable peer discovery (default: true) */
+  enableDiscovery?: boolean
+  /** Discovery poll interval in ms (default: 30000) */
+  discoveryInterval?: number
+  /** Path to nebula-cert binary (default: 'nebula-cert') */
+  nebulaCertPath?: string
+}
+
+// =============================================================================
 // Hub Election Types
 // =============================================================================
 
@@ -90,6 +111,22 @@ export interface NebulaMeshConfig {
 
   // Port for mesh communication
   port?: number // Default: 7946
+
+  // Serialization (Phase 6.2)
+  /**
+   * Default serialization format for all channels.
+   * - 'json': Always use JSON (backward compatible)
+   * - 'binary': Always use MessagePack (best performance)
+   * - 'auto': Negotiate with peer, prefer binary (default)
+   */
+  serialization?: 'json' | 'binary' | 'auto'
+
+  /**
+   * Enable compression for large messages (>1KB).
+   * Only applies to binary format.
+   * Default: true
+   */
+  compressionEnabled?: boolean
 }
 
 // =============================================================================

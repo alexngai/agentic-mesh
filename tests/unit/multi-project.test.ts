@@ -4,6 +4,41 @@ import * as path from 'path'
 import * as os from 'os'
 import { MultiProjectManager } from '../../src/integrations/sudocode/multi-project'
 
+// Mock NebulaMesh to avoid creating real network connections
+vi.mock('../../src/mesh/nebula-mesh', () => {
+  const { EventEmitter } = require('events')
+
+  class MockNebulaMesh extends EventEmitter {
+    config: unknown
+    _connected = false
+
+    constructor(config: unknown) {
+      super()
+      this.config = config
+    }
+
+    async connect() {
+      this._connected = true
+    }
+
+    async disconnect() {
+      this._connected = false
+    }
+
+    get connected() {
+      return this._connected
+    }
+
+    getActiveNamespaces() {
+      return new Map()
+    }
+  }
+
+  return {
+    NebulaMesh: MockNebulaMesh,
+  }
+})
+
 // Mock SudocodeMeshService to avoid creating real mesh connections
 vi.mock('../../src/integrations/sudocode/service', () => {
   class MockSudocodeMeshService {
