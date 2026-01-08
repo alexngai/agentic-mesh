@@ -41,6 +41,7 @@
   "homepage": "https://github.com/alexngai/agentic-mesh#readme",
   "devDependencies": {
     "@types/node": "^25.0.3",
+    "@types/picomatch": "^4.0.2",
     "ts-node": "^10.9.2",
     "tsup": "^8.0.0",
     "tsx": "^4.21.0",
@@ -51,6 +52,7 @@
     "@msgpack/msgpack": "^3.1.3",
     "commander": "^14.0.2",
     "lib0": "^0.2.117",
+    "picomatch": "^4.0.3",
     "y-protocols": "^1.0.7",
     "yjs": "^13.6.29"
   }

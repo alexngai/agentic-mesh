@@ -17,10 +17,14 @@ import type {
   EntityChangeEvent,
   EntityChangeSource,
   SudocodeEntityType,
+  SyncableEntityType,
 } from './types'
+import { ALL_SYNCABLE_ENTITIES } from './types'
 import { EntityMapper } from './mapper'
 import { JSONLBridge } from './jsonl-bridge'
 import { GitReconciler, ReconcileEvent } from './git-reconciler'
+import { SyncFilterEngine, type SyncFilter } from './sync-filter'
+import { PartitionManager, type PartitionConfig, type PartitionInfo } from './partition-manager'
 
 const DEFAULT_SAVE_DEBOUNCE_MS = 500
 
@@ -33,6 +37,9 @@ export class SudocodeMeshService extends EventEmitter {
   private gitReconciler: GitReconciler | null = null
   private saveDebounceTimer: NodeJS.Timeout | null = null
   private _connected = false
+  private syncEntities: Set<SyncableEntityType>
+  private filterEngine: SyncFilterEngine
+  private partitionManager: PartitionManager
 
   // CRDT maps
   private specs!: Y.Map<SpecCRDT>
@@ -48,6 +55,176 @@ export class SudocodeMeshService extends EventEmitter {
     }
     this.mapper = new EntityMapper()
     this.bridge = new JSONLBridge(config.projectPath)
+    // Resolve syncEntities - default to all types
+    this.syncEntities = new Set(config.syncEntities ?? ALL_SYNCABLE_ENTITIES)
+    // Initialize filter engine with optional config
+    this.filterEngine = new SyncFilterEngine(config.syncFilter)
+    // Initialize partition manager with optional config
+    this.partitionManager = new PartitionManager(config.projectId, config.partitionConfig)
+  }
+
+  // ==========================================================================
+  // Entity Sync Filtering
+  // ==========================================================================
+
+  /**
+   * Check if a specific entity type should be synced over the mesh.
+   * Returns true if sync is enabled for this type.
+   */
+  shouldSyncEntityType(entityType: SyncableEntityType): boolean {
+    return this.syncEntities.has(entityType)
+  }
+
+  /**
+   * Get the list of entity types enabled for sync.
+   */
+  getSyncedEntityTypes(): SyncableEntityType[] {
+    return Array.from(this.syncEntities)
+  }
+
+  // ==========================================================================
+  // Fine-Grained Sync Filtering (ID/Attribute)
+  // ==========================================================================
+
+  /**
+   * Set or update the sync filter at runtime.
+   * Use this for fine-grained control over which entities sync.
+   */
+  setSyncFilter(filter: SyncFilter): void {
+    this.filterEngine.setFilter(filter)
+    this.emit('filter:changed', filter)
+  }
+
+  /**
+   * Get the current sync filter configuration.
+   */
+  getSyncFilter(): SyncFilter {
+    return this.filterEngine.getFilter()
+  }
+
+  /**
+   * Clear all sync filters (sync everything that passes entity type filter).
+   */
+  clearSyncFilter(): void {
+    this.filterEngine.clearFilter()
+    this.emit('filter:cleared')
+  }
+
+  /**
+   * Check if a specific spec passes the sync filter.
+   */
+  shouldSyncSpec(spec: SpecCRDT): boolean {
+    return this.shouldSyncEntityType('specs') && this.filterEngine.shouldSyncSpec(spec)
+  }
+
+  /**
+   * Check if a specific issue passes the sync filter.
+   */
+  shouldSyncIssue(issue: IssueCRDT): boolean {
+    return this.shouldSyncEntityType('issues') && this.filterEngine.shouldSyncIssue(issue)
+  }
+
+  /**
+   * Check if a specific relationship passes the sync filter.
+   */
+  shouldSyncRelationship(rel: RelationshipCRDT): boolean {
+    return (
+      this.shouldSyncEntityType('relationships') &&
+      this.filterEngine.shouldSyncRelationship(rel)
+    )
+  }
+
+  /**
+   * Check if specific feedback passes the sync filter.
+   */
+  shouldSyncFeedback(fb: FeedbackCRDT): boolean {
+    return this.shouldSyncEntityType('feedback') && this.filterEngine.shouldSyncFeedback(fb)
+  }
+
+  // ==========================================================================
+  // Namespace Partitioning
+  // ==========================================================================
+
+  /**
+   * Check if partitioning is enabled.
+   */
+  get partitioningEnabled(): boolean {
+    return this.partitionManager.enabled
+  }
+
+  /**
+   * Get the partition manager for advanced partition operations.
+   */
+  getPartitionManager(): PartitionManager {
+    return this.partitionManager
+  }
+
+  /**
+   * Set or update partition configuration at runtime.
+   */
+  setPartitionConfig(config: PartitionConfig): void {
+    this.partitionManager.setConfig(config)
+    this.emit('partition:config:changed', config)
+  }
+
+  /**
+   * Subscribe to a partition (will sync entities in that partition).
+   */
+  subscribeToPartition(partition: string): void {
+    this.partitionManager.subscribe(partition)
+  }
+
+  /**
+   * Unsubscribe from a partition (will stop syncing entities in that partition).
+   */
+  unsubscribeFromPartition(partition: string): void {
+    this.partitionManager.unsubscribe(partition)
+  }
+
+  /**
+   * Get list of partitions this peer is subscribed to.
+   */
+  getSubscribedPartitions(): string[] {
+    return this.partitionManager.getSubscriptions()
+  }
+
+  /**
+   * Get all known partitions with subscription status.
+   */
+  getKnownPartitions(): PartitionInfo[] {
+    return this.partitionManager.getKnownPartitions()
+  }
+
+  /**
+   * Check if a spec should be synced (combines type, filter, and partition checks).
+   */
+  shouldSyncSpecWithPartition(spec: SpecCRDT): boolean {
+    if (!this.shouldSyncSpec(spec)) return false
+    return this.partitionManager.shouldSync('spec', spec)
+  }
+
+  /**
+   * Check if an issue should be synced (combines type, filter, and partition checks).
+   */
+  shouldSyncIssueWithPartition(issue: IssueCRDT): boolean {
+    if (!this.shouldSyncIssue(issue)) return false
+    return this.partitionManager.shouldSync('issue', issue)
+  }
+
+  /**
+   * Check if a relationship should be synced (combines type, filter, and partition checks).
+   */
+  shouldSyncRelationshipWithPartition(rel: RelationshipCRDT): boolean {
+    if (!this.shouldSyncRelationship(rel)) return false
+    return this.partitionManager.shouldSync('relationship', rel)
+  }
+
+  /**
+   * Check if feedback should be synced (combines type, filter, and partition checks).
+   */
+  shouldSyncFeedbackWithPartition(fb: FeedbackCRDT): boolean {
+    if (!this.shouldSyncFeedback(fb)) return false
+    return this.partitionManager.shouldSync('feedback', fb)
   }
 
   // ==========================================================================
@@ -174,10 +351,16 @@ export class SudocodeMeshService extends EventEmitter {
   // ==========================================================================
 
   /**
-   * Sync a spec change to CRDT
+   * Sync a spec change to CRDT.
+   * Skips sync if 'specs' entity type is not enabled or spec doesn't pass filter.
    */
   syncSpec(spec: SpecCRDT, source: EntityChangeSource = 'local'): void {
     if (!this.provider) throw new Error('Not connected')
+
+    // Skip if specs sync is disabled or doesn't pass filter
+    if (!this.shouldSyncSpec(spec)) {
+      return
+    }
 
     this.provider.doc.transact(() => {
       this.specs.set(spec.id, spec)
@@ -189,10 +372,16 @@ export class SudocodeMeshService extends EventEmitter {
   }
 
   /**
-   * Sync an issue change to CRDT
+   * Sync an issue change to CRDT.
+   * Skips sync if 'issues' entity type is not enabled or issue doesn't pass filter.
    */
   syncIssue(issue: IssueCRDT, source: EntityChangeSource = 'local'): void {
     if (!this.provider) throw new Error('Not connected')
+
+    // Skip if issues sync is disabled or doesn't pass filter
+    if (!this.shouldSyncIssue(issue)) {
+      return
+    }
 
     this.provider.doc.transact(() => {
       this.issues.set(issue.id, issue)
@@ -204,13 +393,19 @@ export class SudocodeMeshService extends EventEmitter {
   }
 
   /**
-   * Sync a relationship change to CRDT
+   * Sync a relationship change to CRDT.
+   * Skips sync if 'relationships' entity type is not enabled or doesn't pass filter.
    */
   syncRelationship(
     relationship: RelationshipCRDT,
     source: EntityChangeSource = 'local'
   ): void {
     if (!this.provider) throw new Error('Not connected')
+
+    // Skip if relationships sync is disabled or doesn't pass filter
+    if (!this.shouldSyncRelationship(relationship)) {
+      return
+    }
 
     const key = `${relationship.from_id}:${relationship.to_id}:${relationship.relationship_type}`
 
@@ -224,10 +419,16 @@ export class SudocodeMeshService extends EventEmitter {
   }
 
   /**
-   * Sync feedback change to CRDT
+   * Sync feedback change to CRDT.
+   * Skips sync if 'feedback' entity type is not enabled or doesn't pass filter.
    */
   syncFeedback(fb: FeedbackCRDT, source: EntityChangeSource = 'local'): void {
     if (!this.provider) throw new Error('Not connected')
+
+    // Skip if feedback sync is disabled or doesn't pass filter
+    if (!this.shouldSyncFeedback(fb)) {
+      return
+    }
 
     this.provider.doc.transact(() => {
       this.feedback.set(fb.id, fb)
@@ -239,10 +440,16 @@ export class SudocodeMeshService extends EventEmitter {
   }
 
   /**
-   * Delete a spec from CRDT
+   * Delete a spec from CRDT.
+   * Skips if 'specs' entity type is not enabled.
    */
   deleteSpec(id: string, source: EntityChangeSource = 'local'): void {
     if (!this.provider) throw new Error('Not connected')
+
+    // Skip if specs sync is disabled
+    if (!this.shouldSyncEntityType('specs')) {
+      return
+    }
 
     this.provider.doc.transact(() => {
       this.specs.delete(id)
@@ -254,10 +461,16 @@ export class SudocodeMeshService extends EventEmitter {
   }
 
   /**
-   * Delete an issue from CRDT
+   * Delete an issue from CRDT.
+   * Skips if 'issues' entity type is not enabled.
    */
   deleteIssue(id: string, source: EntityChangeSource = 'local'): void {
     if (!this.provider) throw new Error('Not connected')
+
+    // Skip if issues sync is disabled
+    if (!this.shouldSyncEntityType('issues')) {
+      return
+    }
 
     this.provider.doc.transact(() => {
       this.issues.delete(id)
@@ -269,10 +482,16 @@ export class SudocodeMeshService extends EventEmitter {
   }
 
   /**
-   * Delete a relationship from CRDT
+   * Delete a relationship from CRDT.
+   * Skips if 'relationships' entity type is not enabled.
    */
   deleteRelationship(key: string, source: EntityChangeSource = 'local'): void {
     if (!this.provider) throw new Error('Not connected')
+
+    // Skip if relationships sync is disabled
+    if (!this.shouldSyncEntityType('relationships')) {
+      return
+    }
 
     this.provider.doc.transact(() => {
       this.relationships.delete(key)
@@ -284,10 +503,16 @@ export class SudocodeMeshService extends EventEmitter {
   }
 
   /**
-   * Delete feedback from CRDT
+   * Delete feedback from CRDT.
+   * Skips if 'feedback' entity type is not enabled.
    */
   deleteFeedback(id: string, source: EntityChangeSource = 'local'): void {
     if (!this.provider) throw new Error('Not connected')
+
+    // Skip if feedback sync is disabled
+    if (!this.shouldSyncEntityType('feedback')) {
+      return
+    }
 
     this.provider.doc.transact(() => {
       this.feedback.delete(id)
@@ -393,6 +618,19 @@ export class SudocodeMeshService extends EventEmitter {
     })
   }
 
+  /**
+   * Map SudocodeEntityType to SyncableEntityType for filtering.
+   */
+  private entityTypeToSyncable(entityType: SudocodeEntityType): SyncableEntityType {
+    const mapping: Record<SudocodeEntityType, SyncableEntityType> = {
+      spec: 'specs',
+      issue: 'issues',
+      relationship: 'relationships',
+      feedback: 'feedback',
+    }
+    return mapping[entityType]
+  }
+
   private handleMapChange<T>(
     entityType: SudocodeEntityType,
     event: Y.YMapEvent<T>,
@@ -402,6 +640,12 @@ export class SudocodeMeshService extends EventEmitter {
 
     // Only process remote changes
     if (source === 'local') return
+
+    // Filter: ignore remote changes for disabled entity types
+    const syncableType = this.entityTypeToSyncable(entityType)
+    if (!this.shouldSyncEntityType(syncableType)) {
+      return
+    }
 
     for (const [key, change] of event.changes.keys) {
       const entity = map.get(key)

@@ -7,6 +7,21 @@ import type { NebulaMeshConfig } from '../../types'
 // Service Configuration
 // =============================================================================
 
+/** Entity types that can be selectively synced */
+export type SyncableEntityType = 'specs' | 'issues' | 'relationships' | 'feedback'
+
+/** All syncable entity types (for default behavior) */
+export const ALL_SYNCABLE_ENTITIES: SyncableEntityType[] = [
+  'specs',
+  'issues',
+  'relationships',
+  'feedback',
+]
+
+// Import sync filter types (forward declaration to avoid circular deps)
+import type { SyncFilter } from './sync-filter'
+import type { PartitionConfig } from './partition-manager'
+
 export interface SudocodeMeshConfig {
   /** Unique project identifier */
   projectId: string
@@ -16,6 +31,12 @@ export interface SudocodeMeshConfig {
   meshConfig: NebulaMeshConfig
   /** Debounce delay for JSONL saves (ms) */
   saveDebounceMs?: number // Default: 500
+  /** Entity types to sync over mesh (default: all types) */
+  syncEntities?: SyncableEntityType[]
+  /** Fine-grained sync filter for ID patterns and attributes */
+  syncFilter?: SyncFilter
+  /** Namespace partitioning configuration for selective sync */
+  partitionConfig?: PartitionConfig
 }
 
 // =============================================================================
