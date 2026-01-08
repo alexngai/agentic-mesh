@@ -184,6 +184,45 @@ export interface WireMessage<T = unknown> {
 }
 
 // =============================================================================
+// Hub Relay Types (Phase 9.1)
+// =============================================================================
+
+/**
+ * Message to be relayed through the hub for NAT-blocked peers.
+ */
+export interface RelayMessage<T = unknown> {
+  type: 'relay'
+  /** Original sender peer ID */
+  from: string
+  /** Target peer ID */
+  to: string
+  /** Channel name */
+  channel: string
+  /** Original message payload */
+  payload: T
+  /** Original message type */
+  messageType: 'message' | 'request' | 'response'
+  /** Request ID for RPC messages */
+  requestId?: string
+  /** Timestamp when relay was requested */
+  timestamp: number
+}
+
+/**
+ * Stats for hub relay operations.
+ */
+export interface RelayStats {
+  /** Number of messages relayed */
+  messagesRelayed: number
+  /** Number of relay requests received */
+  relayRequestsReceived: number
+  /** Number of relay failures */
+  relayFailures: number
+  /** Number of messages queued for offline peers */
+  messagesQueuedForRelay: number
+}
+
+// =============================================================================
 // Sync Provider Types
 // =============================================================================
 

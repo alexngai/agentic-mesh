@@ -18,8 +18,16 @@ import type {
   EntityChangeSource,
   SudocodeEntityType,
   SyncableEntityType,
+  IssueExecutionOptions,
+  IssueExecutionResult,
+  IssueExecutionRequestEvent,
+  SudocodeAction,
+  SudocodePermissionResult,
 } from './types'
 import { ALL_SYNCABLE_ENTITIES } from './types'
+import { ExecutionRouter, type ExecutionRequestEvent } from '../../mesh/execution-router'
+import { ExecutionStream, type StreamingExecutionRequestEvent } from '../../mesh/execution-stream'
+import { GroupPermissions, PermissionLevel } from '../../certs/group-permissions'
 import { EntityMapper } from './mapper'
 import { JSONLBridge } from './jsonl-bridge'
 import { GitReconciler, ReconcileEvent } from './git-reconciler'
@@ -35,11 +43,13 @@ export class SudocodeMeshService extends EventEmitter {
   private mapper: EntityMapper
   private bridge: JSONLBridge
   private gitReconciler: GitReconciler | null = null
+  private executionRouter: ExecutionRouter | null = null
   private saveDebounceTimer: NodeJS.Timeout | null = null
   private _connected = false
   private syncEntities: Set<SyncableEntityType>
   private filterEngine: SyncFilterEngine
   private partitionManager: PartitionManager
+  private permissions: GroupPermissions
 
   // CRDT maps
   private specs!: Y.Map<SpecCRDT>
@@ -61,6 +71,15 @@ export class SudocodeMeshService extends EventEmitter {
     this.filterEngine = new SyncFilterEngine(config.syncFilter)
     // Initialize partition manager with optional config
     this.partitionManager = new PartitionManager(config.projectId, config.partitionConfig)
+    // Initialize permissions with optional config
+    const permConfig = config.permissionConfig ?? {}
+    this.permissions = new GroupPermissions({
+      hierarchy: {
+        admin: permConfig.adminGroups ?? ['admin', 'admins'],
+        write: permConfig.developerGroups ?? ['developer', 'developers', 'editor', 'editors'],
+        read: permConfig.readonlyGroups ?? ['readonly', 'viewer', 'viewers'],
+      },
+    })
   }
 
   // ==========================================================================
@@ -278,8 +297,28 @@ export class SudocodeMeshService extends EventEmitter {
       await this.handleGitChange(event)
     })
 
+    // Initialize execution router for remote execution
+    this.executionRouter = new ExecutionRouter(this.mesh)
+    this.setupExecutionHandlers()
+
     this._connected = true
     this.emit('connected')
+  }
+
+  /**
+   * Set up execution event forwarding.
+   */
+  private setupExecutionHandlers(): void {
+    if (!this.executionRouter) return
+
+    // Forward execution request events for issue-based execution
+    this.executionRouter.on('execution:requested', (event: ExecutionRequestEvent) => {
+      this.emit('execution:requested', event)
+    })
+
+    this.executionRouter.on('execution:streaming', (event: StreamingExecutionRequestEvent) => {
+      this.emit('execution:streaming', event)
+    })
   }
 
   /**
@@ -308,6 +347,12 @@ export class SudocodeMeshService extends EventEmitter {
     if (this.gitReconciler) {
       this.gitReconciler.stop()
       this.gitReconciler = null
+    }
+
+    // Stop execution router
+    if (this.executionRouter) {
+      await this.executionRouter.stop()
+      this.executionRouter = null
     }
 
     // Save final state
@@ -764,5 +809,228 @@ export class SudocodeMeshService extends EventEmitter {
 
     const event = await this.gitReconciler.checkAndReconcile()
     return event !== null
+  }
+
+  // ==========================================================================
+  // Remote Execution (Phase 9.3)
+  // ==========================================================================
+
+  /**
+   * Request execution of an issue on a remote peer.
+   *
+   * @param peerId Target peer to execute on
+   * @param issueId Issue ID to execute
+   * @param options Execution options
+   * @returns Execution result
+   *
+   * @example
+   * ```typescript
+   * const result = await meshService.requestExecution('bob-workstation', 'i-abc1', {
+   *   agentType: 'claude-code',
+   *   worktreeSync: 'squash'
+   * })
+   * ```
+   */
+  async requestExecution(
+    peerId: string,
+    issueId: string,
+    options: IssueExecutionOptions = {}
+  ): Promise<IssueExecutionResult> {
+    if (!this.executionRouter) {
+      throw new Error('Not connected')
+    }
+
+    // Validate issue exists locally
+    const issue = this.getIssue(issueId)
+    if (!issue) {
+      throw new Error(`Issue not found: ${issueId}`)
+    }
+
+    // Build command based on options
+    const command = this.buildExecutionCommand(issueId, options)
+
+    try {
+      const response = await this.executionRouter.requestExecution(peerId, command, {
+        timeout: options.timeout,
+        cwd: this.config.projectPath,
+      })
+
+      return {
+        success: response.success,
+        issueId,
+        peerId,
+        exitCode: response.exitCode,
+        output: response.stdout,
+        error: response.error ?? response.stderr,
+      }
+    } catch (error) {
+      return {
+        success: false,
+        issueId,
+        peerId,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      }
+    }
+  }
+
+  /**
+   * Request streaming execution of an issue on a remote peer.
+   * Returns an ExecutionStream for real-time output.
+   *
+   * @param peerId Target peer to execute on
+   * @param issueId Issue ID to execute
+   * @param options Execution options
+   * @returns ExecutionStream for receiving output
+   *
+   * @example
+   * ```typescript
+   * const stream = meshService.requestExecutionWithStream('bob-workstation', 'i-abc1')
+   * stream.on('stdout', (data) => console.log(data))
+   * stream.on('exit', (code) => console.log('Done:', code))
+   * ```
+   */
+  requestExecutionWithStream(
+    peerId: string,
+    issueId: string,
+    options: IssueExecutionOptions = {}
+  ): ExecutionStream {
+    if (!this.executionRouter) {
+      throw new Error('Not connected')
+    }
+
+    // Validate issue exists locally
+    const issue = this.getIssue(issueId)
+    if (!issue) {
+      throw new Error(`Issue not found: ${issueId}`)
+    }
+
+    // Build command based on options
+    const command = this.buildExecutionCommand(issueId, options)
+
+    return this.executionRouter.requestExecutionWithStream(peerId, command, {
+      cwd: this.config.projectPath,
+    })
+  }
+
+  /**
+   * Build the execution command for an issue.
+   */
+  private buildExecutionCommand(issueId: string, options: IssueExecutionOptions): string {
+    const parts = ['sudocode', 'exec', issueId]
+
+    if (options.agentType) {
+      parts.push('--agent', options.agentType)
+    }
+
+    if (options.worktreeSync) {
+      parts.push('--worktree-sync', options.worktreeSync)
+    }
+
+    return parts.join(' ')
+  }
+
+  /**
+   * Get the execution router for advanced operations.
+   */
+  getExecutionRouter(): ExecutionRouter | null {
+    return this.executionRouter
+  }
+
+  // ==========================================================================
+  // Permission Checking (Phase 9.5)
+  // ==========================================================================
+
+  /**
+   * Check if a peer has permission for a specific action.
+   *
+   * Permission model:
+   * - read: All groups can read
+   * - write: developer/admin groups can write
+   * - execute: developer/admin groups can execute
+   * - admin: admin groups only
+   *
+   * @param peer The peer to check permissions for
+   * @param action The action to check
+   * @returns Permission check result
+   *
+   * @example
+   * ```typescript
+   * const result = meshService.checkPermission(peer, 'write')
+   * if (result.allowed) {
+   *   // Allow write operation
+   * }
+   * ```
+   */
+  checkPermission(peer: PeerInfo, action: SudocodeAction): SudocodePermissionResult {
+    const level = this.actionToPermissionLevel(action)
+    const result = this.permissions.checkPermission(peer.groups, level)
+
+    return {
+      allowed: result.allowed,
+      action,
+      peerGroups: peer.groups,
+      requiredGroups: result.missingGroups,
+    }
+  }
+
+  /**
+   * Check if a peer can read entities.
+   */
+  canRead(peer: PeerInfo): boolean {
+    return this.permissions.canRead(peer.groups)
+  }
+
+  /**
+   * Check if a peer can write entities.
+   */
+  canWrite(peer: PeerInfo): boolean {
+    return this.permissions.canWrite(peer.groups)
+  }
+
+  /**
+   * Check if a peer can execute issues.
+   */
+  canExecute(peer: PeerInfo): boolean {
+    // Execute requires write-level permissions
+    return this.permissions.canWrite(peer.groups)
+  }
+
+  /**
+   * Check if a peer has admin access.
+   */
+  canAdmin(peer: PeerInfo): boolean {
+    return this.permissions.canAdmin(peer.groups)
+  }
+
+  /**
+   * Enforce a permission, throwing an error if denied.
+   */
+  enforcePermission(peer: PeerInfo, action: SudocodeAction): void {
+    const level = this.actionToPermissionLevel(action)
+    this.permissions.enforcePermission(peer.groups, level)
+  }
+
+  /**
+   * Get the GroupPermissions instance for advanced operations.
+   */
+  getPermissions(): GroupPermissions {
+    return this.permissions
+  }
+
+  /**
+   * Map action to permission level.
+   */
+  private actionToPermissionLevel(action: SudocodeAction): PermissionLevel {
+    switch (action) {
+      case 'admin':
+        return PermissionLevel.ADMIN
+      case 'write':
+      case 'execute':
+        return PermissionLevel.WRITE
+      case 'read':
+        return PermissionLevel.READ
+      default:
+        return PermissionLevel.NONE
+    }
   }
 }

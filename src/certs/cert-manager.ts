@@ -20,6 +20,14 @@ import {
   RevocationList,
   RevocationListExport,
 } from './types'
+import type { NebulaMesh } from '../mesh/nebula-mesh'
+import type { MessageChannel } from '../channel/message-channel'
+
+// Revocation update message type
+interface RevocationUpdateMessage {
+  type: 'revocation:update'
+  list: RevocationListExport
+}
 
 const INDEX_VERSION = 1
 const REVOCATION_VERSION = 1
@@ -35,6 +43,10 @@ export class CertManager extends EventEmitter {
   private revocationList: RevocationList
   private autoRenewalTimer: NodeJS.Timeout | null = null
   private initialized = false
+
+  // Mesh integration (Phase 9.4)
+  private mesh: NebulaMesh | null = null
+  private revocationChannel: MessageChannel<RevocationUpdateMessage> | null = null
 
   constructor(config: CertManagerConfig) {
     super()
@@ -83,6 +95,7 @@ export class CertManager extends EventEmitter {
    */
   async shutdown(): Promise<void> {
     this.stopAutoRenewal()
+    await this.disconnectFromMesh()
     this.initialized = false
   }
 
@@ -594,6 +607,9 @@ export class CertManager extends EventEmitter {
     await this.saveIndex()
 
     this.emit('cert:revoked', { cert, reason })
+
+    // Broadcast update to mesh if connected (Phase 9.4)
+    this.broadcastRevocationUpdate()
   }
 
   /**
@@ -789,6 +805,101 @@ export class CertManager extends EventEmitter {
       await this.saveIndex()
       throw error
     }
+  }
+
+  // ===========================================================================
+  // Mesh Integration (Phase 9.4)
+  // ===========================================================================
+
+  /**
+   * Connect to a mesh for revocation list distribution.
+   * When connected as hub, revocation updates are broadcast to all peers.
+   * When connected as peer, revocation updates are received and imported.
+   *
+   * @param mesh The NebulaMesh instance to connect to
+   *
+   * @example
+   * ```typescript
+   * const mesh = new NebulaMesh(config)
+   * await mesh.connect()
+   * certManager.connectToMesh(mesh)
+   *
+   * // On revoke, hub broadcasts automatically
+   * await certManager.revokeCert(compromisedCert)
+   * ```
+   */
+  connectToMesh(mesh: NebulaMesh): void {
+    this.ensureInitialized()
+
+    if (this.mesh) {
+      throw new Error('Already connected to mesh')
+    }
+
+    this.mesh = mesh
+
+    // Create revocation channel
+    this.revocationChannel = mesh.createChannel<RevocationUpdateMessage>('certs:revocation')
+
+    // Handle incoming revocation updates
+    this.revocationChannel.on('message', async (msg) => {
+      if (msg.type === 'revocation:update') {
+        try {
+          const added = await this.importRevocationList(msg.list)
+          if (added > 0) {
+            this.emit('revocation:imported', { count: added })
+          }
+        } catch (error) {
+          this.emit('error', { message: 'Failed to import revocation list', error })
+        }
+      }
+    })
+
+    // Open the channel
+    this.revocationChannel.open().catch((error) => {
+      this.emit('error', { message: 'Failed to open revocation channel', error })
+    })
+
+    this.emit('mesh:connected')
+  }
+
+  /**
+   * Disconnect from mesh.
+   */
+  async disconnectFromMesh(): Promise<void> {
+    if (!this.mesh) return
+
+    if (this.revocationChannel) {
+      await this.revocationChannel.close()
+      this.revocationChannel = null
+    }
+
+    this.mesh = null
+    this.emit('mesh:disconnected')
+  }
+
+  /**
+   * Check if connected to mesh.
+   */
+  get meshConnected(): boolean {
+    return this.mesh !== null
+  }
+
+  /**
+   * Broadcast revocation update to all peers (hub only).
+   */
+  private broadcastRevocationUpdate(): void {
+    if (!this.mesh || !this.revocationChannel) return
+
+    // Only broadcast if we're the hub
+    if (!this.mesh.isHub()) return
+
+    const msg: RevocationUpdateMessage = {
+      type: 'revocation:update',
+      list: this.exportRevocationList(),
+    }
+
+    this.revocationChannel.broadcast(msg)
+    this.emit('revocation:broadcast')
   }
 
   // ===========================================================================

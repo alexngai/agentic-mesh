@@ -37,6 +37,8 @@ export interface SudocodeMeshConfig {
   syncFilter?: SyncFilter
   /** Namespace partitioning configuration for selective sync */
   partitionConfig?: PartitionConfig
+  /** Permission configuration for group-based access control (Phase 9.5) */
+  permissionConfig?: SudocodePermissionConfig
 }
 
 // =============================================================================
@@ -254,4 +256,87 @@ export interface FeedbackJSONL {
   dismissed?: boolean
   created_at: string
   updated_at: string
+}
+
+// =============================================================================
+// Remote Execution Types (Phase 9.3)
+// =============================================================================
+
+/**
+ * Options for requesting issue execution on a remote peer.
+ */
+export interface IssueExecutionOptions {
+  /** Agent type to use for execution */
+  agentType?: 'claude-code' | 'custom'
+  /** Worktree sync strategy */
+  worktreeSync?: 'none' | 'squash' | 'rebase'
+  /** Optional timeout in ms */
+  timeout?: number
+  /** Whether to stream execution output */
+  stream?: boolean
+}
+
+/**
+ * Result of an issue execution request.
+ */
+export interface IssueExecutionResult {
+  /** Whether execution was successful */
+  success: boolean
+  /** Issue ID that was executed */
+  issueId: string
+  /** Peer that executed the issue */
+  peerId: string
+  /** Exit code (0 for success) */
+  exitCode?: number
+  /** Execution output */
+  output?: string
+  /** Error message if failed */
+  error?: string
+}
+
+/**
+ * Event for incoming issue execution request.
+ */
+export interface IssueExecutionRequestEvent {
+  /** Issue ID to execute */
+  issueId: string
+  /** Execution options */
+  options: IssueExecutionOptions
+  /** Peer that requested execution */
+  from: import('../../types').PeerInfo
+  /** Function to accept and respond to the request */
+  accept: (handler: (update: string) => void) => Promise<IssueExecutionResult>
+  /** Function to reject the request */
+  reject: (reason: string) => void
+}
+
+// =============================================================================
+// Permission Types (Phase 9.5)
+// =============================================================================
+
+/**
+ * Sudocode mesh actions that can be permission-checked.
+ */
+export type SudocodeAction = 'read' | 'write' | 'execute' | 'admin'
+
+/**
+ * Permission configuration for SudocodeMeshService.
+ */
+export interface SudocodePermissionConfig {
+  /** Groups that have admin access */
+  adminGroups?: string[]
+  /** Groups that have developer (read/write/execute) access */
+  developerGroups?: string[]
+  /** Groups that have read-only access */
+  readonlyGroups?: string[]
+}
+
+/**
+ * Result of a permission check.
+ */
+export interface SudocodePermissionResult {
+  allowed: boolean
+  action: SudocodeAction
+  peerGroups: string[]
+  requiredGroups?: string[]
 }

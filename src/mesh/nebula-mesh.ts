@@ -11,9 +11,12 @@ import type {
   WireMessage,
   HubConfig,
   NebulaAutoConfigOptions,
+  RelayMessage,
+  RelayStats,
 } from '../types'
 import { HubRole } from '../types'
 import { MessageChannel } from '../channel/message-channel'
+import { OfflineQueue, QueuedOperation } from '../channel/offline-queue'
 import { HubElection } from './hub-election'
 import {
   NamespaceRegistry,
@@ -63,6 +66,17 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   private peerDiscovery: PeerDiscovery | null = null
   private discoveryChannel: MessageChannel<DiscoveryMessage> | null = null
   private nebulaSetup: NebulaSetup | null = null
+
+  // Phase 9.1: Hub Relay
+  private relayStats: RelayStats = {
+    messagesRelayed: 0,
+    relayRequestsReceived: 0,
+    relayFailures: 0,
+    messagesQueuedForRelay: 0,
+  }
+
+  // Phase 9.2: Hub Offline Queue
+  private hubOfflineQueue: OfflineQueue | null = null
 
   constructor(config: NebulaMeshConfig) {
     super()
@@ -128,11 +142,21 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       // Broadcast hub announcement to all peers
       this.broadcastHubAnnouncement()
 
-      // If we became hub, register our local namespaces
+      // If we became hub, register our local namespaces and init offline queue
       if (event.current === config.peerId) {
         for (const ns of this.namespaces) {
           this.namespaceRegistry.registerPeer(ns, config.peerId)
         }
+        // Initialize hub offline queue
+        this.hubOfflineQueue = new OfflineQueue({
+          ttl: 24 * 60 * 60 * 1000, // 24 hours
+          maxSize: 1000,
+        })
+        this.hubOfflineQueue.init().catch(() => {})
+      } else if (event.previous === config.peerId && this.hubOfflineQueue) {
+        // We stopped being hub, cleanup queue
+        this.hubOfflineQueue.stop().catch(() => {})
+        this.hubOfflineQueue = null
       }
     })
 
@@ -287,6 +311,12 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
     // Stop peer discovery
     if (this.peerDiscovery?.running) {
       await this.stopPeerDiscovery()
+    }
+
+    // Stop hub offline queue
+    if (this.hubOfflineQueue) {
+      await this.hubOfflineQueue.stop()
+      this.hubOfflineQueue = null
     }
 
     // Stop health monitoring
@@ -757,6 +787,9 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
 
       // Send current namespace state to the new peer
       this.sendNamespaceSnapshot(peerId)
+
+      // Flush any queued relay messages for this peer (Phase 9.2)
+      this.flushQueuedRelayMessages(peerId)
     }
 
     this.emit('peer:joined', peer)
@@ -845,6 +878,18 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       return
     }
 
+    // Handle relay requests (hub-side) - Phase 9.1
+    if (msg.type === 'relay' && this.isHub()) {
+      this.handleRelayRequest(msg as RelayMessage)
+      return
+    }
+
+    // Handle relayed messages (peer-side) - Phase 9.1
+    if (msg.type === 'relayed') {
+      this.handleRelayedMessage(fromPeerId, msg)
+      return
+    }
+
     // Handle channel messages
     if (msg.channel) {
       const channel = this.channels.get(msg.channel)
@@ -869,7 +914,8 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   _sendToPeer<T>(peerId: string, channelName: string, message: T): boolean {
     const socket = this.connections.get(peerId)
     if (!socket || socket.destroyed) {
-      return false
+      // Try relay via hub if we're not the hub
+      return this.tryRelay(peerId, channelName, message, 'message')
     }
 
     const wireMsg: WireMessage<T> = {
@@ -914,7 +960,8 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   ): boolean {
     const socket = this.connections.get(peerId)
     if (!socket || socket.destroyed) {
-      return false
+      // Try relay via hub if we're not the hub
+      return this.tryRelay(peerId, channelName, message, type, requestId)
     }
 
     const wireMsg: WireMessage<T> = {
@@ -1095,5 +1142,219 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
    */
   isHubHealthy(): boolean {
     return this.healthMonitor.isHubHealthy()
+  }
+
+  // ==========================================================================
+  // Hub Relay (Phase 9.1)
+  // ==========================================================================
+
+  /**
+   * Try to relay a message through the hub when direct connection fails.
+   * @internal
+   */
+  private tryRelay<T>(
+    peerId: string,
+    channelName: string,
+    message: T,
+    messageType: 'message' | 'request' | 'response',
+    requestId?: string
+  ): boolean {
+    // Can't relay if we are the hub (nowhere to relay to)
+    if (this.isHub()) {
+      return false
+    }
+
+    // Get the hub
+    const hubId = this.hubElection.hubId
+    if (!hubId) {
+      return false
+    }
+
+    const hubSocket = this.connections.get(hubId)
+    if (!hubSocket || hubSocket.destroyed) {
+      return false
+    }
+
+    // Send relay request to hub
+    const relayMsg: RelayMessage<T> = {
+      type: 'relay',
+      from: this.config.peerId,
+      to: peerId,
+      channel: channelName,
+      payload: message,
+      messageType,
+      requestId,
+      timestamp: Date.now(),
+    }
+
+    hubSocket.write(JSON.stringify(relayMsg) + '\n')
+    this.emit('relay:sent', { to: peerId, channel: channelName, via: hubId })
+    return true
+  }
+
+  /**
+   * Handle a relay request (hub-side).
+   * Forwards the message to the target peer if connected, or queues if offline.
+   */
+  private handleRelayRequest<T>(msg: RelayMessage<T>): void {
+    this.relayStats.relayRequestsReceived++
+
+    const targetSocket = this.connections.get(msg.to)
+    if (!targetSocket || targetSocket.destroyed) {
+      // Target not connected - queue for later delivery
+      if (this.hubOfflineQueue) {
+        this.hubOfflineQueue.enqueue(msg.channel, msg, msg.to)
+        this.relayStats.messagesQueuedForRelay++
+        this.emit('relay:queued', {
+          from: msg.from,
+          to: msg.to,
+          channel: msg.channel,
+        })
+      } else {
+        this.relayStats.relayFailures++
+        this.emit('relay:failed', {
+          from: msg.from,
+          to: msg.to,
+          reason: 'target_offline',
+        })
+      }
+      return
+    }
+
+    // Forward the message to target as a 'relayed' message
+    this.forwardRelayMessage(msg, targetSocket)
+  }
+
+  /**
+   * Forward a relay message to the target peer.
+   */
+  private forwardRelayMessage<T>(msg: RelayMessage<T>, targetSocket: net.Socket): void {
+    const relayedMsg = {
+      type: 'relayed',
+      originalFrom: msg.from,
+      channel: msg.channel,
+      payload: msg.payload,
+      messageType: msg.messageType,
+      requestId: msg.requestId,
+      timestamp: msg.timestamp,
+    }
+
+    targetSocket.write(JSON.stringify(relayedMsg) + '\n')
+    this.relayStats.messagesRelayed++
+    this.emit('relay:forwarded', {
+      from: msg.from,
+      to: msg.to,
+      channel: msg.channel,
+    })
+  }
+
+  /**
+   * Flush queued relay messages for a peer that has rejoined (hub-side).
+   */
+  private flushQueuedRelayMessages(peerId: string): void {
+    if (!this.hubOfflineQueue || !this.isHub()) {
+      return
+    }
+
+    const targetSocket = this.connections.get(peerId)
+    if (!targetSocket || targetSocket.destroyed) {
+      return
+    }
+
+    const queued = this.hubOfflineQueue.getForPeer(peerId)
+    let flushed = 0
+
+    for (const op of queued) {
+      // Only flush messages specifically targeted to this peer (not broadcasts)
+      if (op.targetPeerId !== peerId) {
+        continue
+      }
+
+      const msg = op.message as RelayMessage
+      this.forwardRelayMessage(msg, targetSocket)
+      this.hubOfflineQueue.dequeue(op.id)
+      flushed++
+    }
+
+    if (flushed > 0) {
+      this.emit('relay:flushed', { peerId, count: flushed })
+    }
+  }
+
+  /**
+   * Handle a relayed message (peer-side).
+   * Processes the message as if it came directly from the original sender.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private handleRelayedMessage(fromPeerId: string, msg: any): void {
+    // Verify it came from the hub (security check)
+    if (fromPeerId !== this.hubElection.hubId) {
+      console.warn('Received relayed message from non-hub peer, ignoring')
+      return
+    }
+
+    // Get or create a virtual peer info for the original sender
+    let originalPeer = this.peers.get(msg.originalFrom)
+    if (!originalPeer) {
+      // Create a minimal peer entry for unknown relayed sender
+      originalPeer = {
+        id: msg.originalFrom,
+        nebulaIp: 'relayed',
+        status: 'online',
+        lastSeen: new Date(),
+        groups: [],
+        activeNamespaces: [],
+        isHub: false,
+      }
+    }
+
+    // Route to appropriate channel
+    const channel = this.channels.get(msg.channel)
+    if (!channel) {
+      return
+    }
+
+    if (msg.messageType === 'message') {
+      channel._receiveMessage(msg.payload, originalPeer)
+    } else if (msg.messageType === 'request' && msg.requestId) {
+      channel._receiveRequest(msg.payload, originalPeer, msg.requestId)
+    } else if (msg.messageType === 'response' && msg.requestId) {
+      channel._receiveResponse(msg.payload, originalPeer, msg.requestId)
+    }
+
+    this.emit('relay:received', {
+      from: msg.originalFrom,
+      channel: msg.channel,
+      via: fromPeerId,
+    })
+  }
+
+  /**
+   * Get relay statistics (hub-side stats are most relevant).
+   */
+  getRelayStats(): RelayStats {
+    return { ...this.relayStats }
+  }
+
+  /**
+   * Reset relay statistics.
+   */
+  resetRelayStats(): void {
+    this.relayStats = {
+      messagesRelayed: 0,
+      relayRequestsReceived: 0,
+      relayFailures: 0,
+      messagesQueuedForRelay: 0,
+    }
+  }
+
+  /**
+   * Get hub offline queue stats (hub-side only).
+   */
+  getHubQueueStats(): { total: number; byChannel: Map<string, number> } | null {
+    if (!this.hubOfflineQueue) {
+      return null
+    }
+    return this.hubOfflineQueue.getStats()
   }
 }
