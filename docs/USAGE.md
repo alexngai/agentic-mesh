@@ -9,6 +9,7 @@ This guide covers setup, configuration, and API usage for agentic-mesh.
 - [Certificate Management](#certificate-management)
 - [NebulaMesh API](#nebulamesh-api)
 - [CRDT Synchronization](#crdt-synchronization)
+- [SQLite CRDT Synchronization](#sqlite-crdt-synchronization)
 - [Message Channels](#message-channels)
 - [Hub System](#hub-system)
 - [Lighthouse Management](#lighthouse-management)
@@ -382,6 +383,167 @@ Y.applyUpdate(doc, state)
 
 ```typescript
 await provider.stop()
+```
+
+---
+
+## SQLite CRDT Synchronization
+
+`CrSqliteSyncProvider` synchronizes SQLite databases using [cr-sqlite](https://vlcn.io/docs/cr-sqlite), providing CRDT-based multi-writer replication.
+
+### Prerequisites
+
+Install the cr-sqlite extension:
+
+```bash
+# Option 1: npm package
+npm install @aspect-build/aspect-rules-cr-sqlite
+
+# Option 2: Manual download
+curl -LO https://github.com/vlcn-io/cr-sqlite/releases/latest/download/crsqlite-darwin-aarch64.dylib
+mkdir -p ~/.cr-sqlite
+mv crsqlite-darwin-aarch64.dylib ~/.cr-sqlite/crsqlite.dylib
+
+# Option 3: Environment variable
+export CRSQLITE_EXTENSION_PATH=/path/to/crsqlite.dylib
+```
+
+### Basic Usage
+
+```typescript
+import { NebulaMesh, CrSqliteSyncProvider } from 'agentic-mesh'
+
+const mesh = new NebulaMesh({
+  peerId: 'alice',
+  nebulaIp: '10.42.0.10',
+  peers: [{ id: 'bob', nebulaIp: '10.42.0.11' }],
+})
+await mesh.connect()
+
+const dbSync = new CrSqliteSyncProvider(mesh, {
+  namespace: 'shared-db',
+  dbPath: './data/shared.db',
+  tables: ['tasks', 'users'],  // Tables to sync
+})
+
+await dbSync.start()
+
+// Get the underlying SQLite database
+const db = dbSync.getDb()
+
+// Create tables (only first peer needs to do this)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    status TEXT,
+    created_at INTEGER
+  )
+`)
+
+// Changes sync automatically to all peers
+db.prepare('INSERT INTO tasks VALUES (?, ?, ?, ?)').run(
+  'task-1', 'Implement feature', 'pending', Date.now()
+)
+
+// Query data (includes changes from other peers)
+const tasks = db.prepare('SELECT * FROM tasks').all()
+console.log('All tasks:', tasks)
+```
+
+### Configuration Options
+
+```typescript
+interface CrSqliteSyncConfig {
+  namespace: string           // Unique namespace for this database
+  dbPath: string              // Path to SQLite database file
+  tables?: string[]           // Tables to sync (default: all CRR tables)
+  pollInterval?: number       // Change detection interval in ms (default: 100)
+  batchSize?: number          // Changesets per sync batch (default: 1000)
+  extensionPath?: string      // Path to cr-sqlite extension (auto-detected)
+  scope?: Record<string, unknown>  // Optional row filter (future)
+}
+```
+
+### Sync Events
+
+```typescript
+// Sync lifecycle
+dbSync.on('syncing', () => {
+  console.log('Syncing with peers...')
+})
+
+dbSync.on('synced', () => {
+  console.log('Initial sync complete')
+})
+
+// Change events
+dbSync.on('change:applied', (table, pk) => {
+  console.log(`Remote change applied: ${table}[${JSON.stringify(pk)}]`)
+})
+
+dbSync.on('change:sent', (table, count) => {
+  console.log(`Sent ${count} changes for ${table}`)
+})
+
+// Hub snapshots
+dbSync.on('snapshot:saved', (path) => {
+  console.log(`Snapshot saved to ${path}`)
+})
+
+// Errors
+dbSync.on('error', (error) => {
+  console.error('Sync error:', error.code, error.message)
+  if (error.recoverable) {
+    console.log('Will retry...')
+  }
+})
+```
+
+### How It Works
+
+1. **CRR Tables**: Tables are upgraded to "Conflict-free Replicated Relations" using cr-sqlite
+2. **Change Tracking**: cr-sqlite tracks changes in a `crsql_changes` virtual table
+3. **Polling**: Provider polls for local changes at `pollInterval`
+4. **Broadcasting**: Changes are broadcast to all peers via MessageChannel
+5. **Merging**: Incoming changes are applied via `crsql_changes` (CRDT merge)
+6. **Version Tracking**: Each peer tracks local and remote versions
+
+### API Reference
+
+```typescript
+// Get the underlying better-sqlite3 database
+const db = dbSync.getDb()
+
+// Get this peer's cr-sqlite site ID
+const siteId = dbSync.getSiteId()
+
+// Get current local version
+const version = dbSync.getLocalVersion()
+
+// Get map of peer versions
+const peerVersions = dbSync.getPeerVersions()
+
+// Force immediate sync check
+await dbSync.sync()
+
+// Stop syncing
+await dbSync.stop()
+```
+
+### Hub Behavior
+
+When the mesh node is a hub, the provider automatically:
+- Saves periodic database snapshots (every 60 seconds)
+- Serves as the primary sync target for new peers
+
+### Installation Help
+
+```typescript
+import { getInstallInstructions } from 'agentic-mesh'
+
+// Get platform-specific installation instructions
+console.log(getInstallInstructions())
 ```
 
 ---

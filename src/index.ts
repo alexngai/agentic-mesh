@@ -16,6 +16,22 @@ export { MessageChannel, OfflineQueue } from './channel'
 export type { QueuedOperation, OfflineQueueConfig } from './channel'
 export { SyncProvider, YjsSyncProvider } from './sync'
 
+// cr-sqlite sync provider
+export {
+  CrSqliteSyncProvider,
+  DbSyncError,
+  detectExtensionPath,
+  getExtensionPath,
+  getInstallInstructions,
+} from './sync'
+export type {
+  CrSqliteSyncConfig,
+  DbSyncMessages,
+  CrSqliteChangeset,
+  ConflictInfo,
+  DbSyncErrorCode,
+} from './sync'
+
 // Certificate management
 export {
   CertManager,

@@ -6,7 +6,8 @@ This file provides context for AI agents working on the agentic-mesh codebase.
 
 agentic-mesh is a P2P CRDT synchronization library over Nebula mesh networks. It provides:
 - Peer-to-peer connectivity over encrypted Nebula tunnels
-- CRDT synchronization using Yjs
+- CRDT synchronization using Yjs (in-memory documents)
+- SQLite CRDT synchronization using cr-sqlite (database replication)
 - Typed message channels with offline queuing
 - Certificate and lighthouse management
 
@@ -32,7 +33,12 @@ src/
 │   └── serializers/            # JSON/msgpack serialization
 ├── sync/                       # CRDT sync
 │   ├── provider.ts             # Base sync provider interface
-│   └── yjs-provider.ts         # Yjs sync implementation
+│   ├── yjs-provider.ts         # Yjs sync implementation
+│   └── cr-sqlite/              # SQLite CRDT sync
+│       ├── provider.ts         # CrSqliteSyncProvider implementation
+│       ├── extension-loader.ts # Platform-specific extension detection
+│       ├── types.ts            # Config, messages, changesets
+│       └── index.ts            # Module exports
 ├── certs/                      # Certificate management
 │   ├── cert-manager.ts         # Certificate lifecycle
 │   ├── config-generator.ts     # Nebula config generation
@@ -69,7 +75,8 @@ examples/
 |-------|------|---------|
 | `NebulaMesh` | `src/mesh/nebula-mesh.ts` | Core mesh connectivity, peer management |
 | `MessageChannel` | `src/channel/message-channel.ts` | Typed pub/sub and RPC messaging |
-| `YjsSyncProvider` | `src/sync/yjs-provider.ts` | CRDT sync over mesh |
+| `YjsSyncProvider` | `src/sync/yjs-provider.ts` | Yjs CRDT sync over mesh |
+| `CrSqliteSyncProvider` | `src/sync/cr-sqlite/provider.ts` | SQLite CRDT sync via cr-sqlite |
 | `CertManager` | `src/certs/cert-manager.ts` | Certificate lifecycle management |
 | `LighthouseManager` | `src/certs/lighthouse-manager.ts` | Lighthouse process control |
 | `ConfigGenerator` | `src/certs/config-generator.ts` | Nebula YAML generation |
@@ -141,9 +148,20 @@ Peer A -> MessageChannel -> NebulaMesh -> TCP/Nebula -> NebulaMesh -> MessageCha
 ```
 
 ### CRDT Sync
+Two sync providers available:
+
+**YjsSyncProvider** (in-memory):
 - Uses Yjs for CRDT operations
-- `YjsSyncProvider` broadcasts updates via `MessageChannel`
+- Best for: real-time collaborative editing, ephemeral state
+- Broadcasts updates via `MessageChannel`
 - State vectors exchanged on peer connection for efficient sync
+
+**CrSqliteSyncProvider** (SQLite):
+- Uses cr-sqlite for CRDT-based SQLite replication
+- Best for: persistent structured data, relational queries
+- Tables become "Conflict-free Replicated Relations" (CRRs)
+- Changes tracked in `crsql_changes` virtual table
+- Polling-based change detection with configurable interval
 
 ### Certificate Chain
 ```
@@ -195,10 +213,12 @@ process.env.DEBUG = 'agentic-mesh:*'
 Key dependencies:
 - `yjs` - CRDT implementation
 - `y-protocols` - Yjs sync protocol
+- `better-sqlite3` - SQLite bindings for cr-sqlite provider
 - `commander` - CLI framework
 - `@msgpack/msgpack` - Binary serialization
 - `picomatch` - Glob pattern matching
 - `lib0` - Yjs utilities
 
-External requirement:
+External requirements:
 - `nebula` / `nebula-cert` - Must be installed on system
+- `cr-sqlite` extension - Required for CrSqliteSyncProvider (auto-detected or via CRSQLITE_EXTENSION_PATH)
