@@ -30,7 +30,7 @@
   },
   "keywords": [],
   "author": "Alex Ngai",
-  "license": "ISC",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/alexngai/agentic-mesh.git"
