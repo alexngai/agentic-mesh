@@ -84,6 +84,7 @@ export * from './integrations'
 
 // ACP integration
 export { AcpMeshAdapter, isAcpRequest, isAcpResponse, isAcpNotification } from './acp'
+export { meshStream, createConnectedStreams } from './acp'
 export type {
   AcpMessage,
   AcpRequest,
@@ -94,6 +95,9 @@ export type {
   AcpMeshAdapterConfig,
   BroadcastTarget,
   RespondFn,
+  MeshStreamConfig,
+  AcpStream,
+  AcpAnyMessage,
 } from './acp'
 
 // Type exports
