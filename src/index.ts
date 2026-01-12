@@ -82,6 +82,20 @@ export type {
 // Integrations
 export * from './integrations'
 
+// ACP integration
+export { AcpMeshAdapter, isAcpRequest, isAcpResponse, isAcpNotification } from './acp'
+export type {
+  AcpMessage,
+  AcpRequest,
+  AcpResponse,
+  AcpNotification,
+  AcpError,
+  AcpMeshEnvelope,
+  AcpMeshAdapterConfig,
+  BroadcastTarget,
+  RespondFn,
+} from './acp'
+
 // Type exports
 export type {
   // Hub types
