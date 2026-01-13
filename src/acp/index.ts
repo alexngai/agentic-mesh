@@ -2,7 +2,7 @@
 // Implements: s-4hjr
 
 export { AcpMeshAdapter } from './adapter'
-export type { RespondFn } from './adapter'
+export type { RespondFn, SessionUpdateCallback } from './adapter'
 export type {
   AcpMessage,
   AcpRequest,
@@ -12,8 +12,25 @@ export type {
   AcpMeshEnvelope,
   AcpMeshAdapterConfig,
   BroadcastTarget,
+  // Session observation types (Phase 3)
+  SessionInfo,
+  SessionObserveRequest,
+  SessionObserveResponse,
+  SessionUnobserveRequest,
+  SessionListRequest,
+  SessionListResponse,
+  SessionEndedNotification,
 } from './types'
-export { isAcpRequest, isAcpResponse, isAcpNotification } from './types'
+export {
+  isAcpRequest,
+  isAcpResponse,
+  isAcpNotification,
+  // Session observation type guards (Phase 3)
+  isSessionObserveRequest,
+  isSessionUnobserveRequest,
+  isSessionListRequest,
+  isSessionEndedNotification,
+} from './types'
 
 // Mesh stream for ACP SDK integration
 export { meshStream, createConnectedStreams } from './mesh-stream'

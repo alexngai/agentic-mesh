@@ -83,7 +83,17 @@ export type {
 export * from './integrations'
 
 // ACP integration
-export { AcpMeshAdapter, isAcpRequest, isAcpResponse, isAcpNotification } from './acp'
+export {
+  AcpMeshAdapter,
+  isAcpRequest,
+  isAcpResponse,
+  isAcpNotification,
+  // Session observation type guards (Phase 3)
+  isSessionObserveRequest,
+  isSessionUnobserveRequest,
+  isSessionListRequest,
+  isSessionEndedNotification,
+} from './acp'
 export { meshStream, createConnectedStreams } from './acp'
 export type {
   AcpMessage,
@@ -95,9 +105,18 @@ export type {
   AcpMeshAdapterConfig,
   BroadcastTarget,
   RespondFn,
+  SessionUpdateCallback,
   MeshStreamConfig,
   AcpStream,
   AcpAnyMessage,
+  // Session observation types (Phase 3)
+  SessionInfo,
+  SessionObserveRequest,
+  SessionObserveResponse,
+  SessionUnobserveRequest,
+  SessionListRequest,
+  SessionListResponse,
+  SessionEndedNotification,
 } from './acp'
 
 // Type exports

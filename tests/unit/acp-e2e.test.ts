@@ -653,4 +653,138 @@ describe('ACP Mesh E2E', () => {
       expect(responses[0].error!.message).toContain('Session not found')
     })
   })
+
+  describe('session observation (Phase 3)', () => {
+    it('should list sessions on remote peer', async () => {
+      // Create a session on Peer B
+      await peerB.server.handleRequest({
+        jsonrpc: '2.0',
+        id: 'create-1',
+        method: 'session/new',
+        params: {},
+      })
+
+      // Peer A lists sessions on Peer B
+      const request: AcpRequest = {
+        jsonrpc: '2.0',
+        id: 'list-1',
+        method: 'session/list',
+        params: {},
+      }
+
+      const responses: AcpResponse[] = []
+      peerA.adapter.onMessage((msg) => {
+        if ('id' in msg && msg.id === 'list-1') {
+          responses.push(msg as AcpResponse)
+        }
+      })
+
+      peerA.adapter.send('peer-b', request)
+      await new Promise((r) => setTimeout(r, 100))
+
+      expect(responses.length).toBe(1)
+      const result = responses[0].result as { sessions: Array<{ sessionId: string; active: boolean }> }
+      expect(result.sessions.length).toBeGreaterThan(0)
+      expect(result.sessions[0].sessionId).toBeDefined()
+      expect(result.sessions[0].active).toBe(true)
+    })
+
+    it('should register observer for session', async () => {
+      // Create a session on Peer B
+      const createResponse = await peerB.server.handleRequest({
+        jsonrpc: '2.0',
+        id: 'create-2',
+        method: 'session/new',
+        params: {},
+      })
+      const sessionId = (createResponse.result as { sessionId: string }).sessionId
+
+      // Peer A observes the session
+      const observeRequest: AcpRequest = {
+        jsonrpc: '2.0',
+        id: 'observe-1',
+        method: 'session/observe',
+        params: { sessionId },
+      }
+
+      const responses: AcpResponse[] = []
+      peerA.adapter.onMessage((msg) => {
+        if ('id' in msg && msg.id === 'observe-1') {
+          responses.push(msg as AcpResponse)
+        }
+      })
+
+      peerA.adapter.send('peer-b', observeRequest)
+      await new Promise((r) => setTimeout(r, 100))
+
+      expect(responses.length).toBe(1)
+      const result = responses[0].result as { success: boolean }
+      expect(result.success).toBe(true)
+    })
+
+    it('should return error when observing non-existent session', async () => {
+      const observeRequest: AcpRequest = {
+        jsonrpc: '2.0',
+        id: 'observe-bad',
+        method: 'session/observe',
+        params: { sessionId: 'nonexistent-session' },
+      }
+
+      const responses: AcpResponse[] = []
+      peerA.adapter.onMessage((msg) => {
+        if ('id' in msg && msg.id === 'observe-bad') {
+          responses.push(msg as AcpResponse)
+        }
+      })
+
+      peerA.adapter.send('peer-b', observeRequest)
+      await new Promise((r) => setTimeout(r, 100))
+
+      expect(responses.length).toBe(1)
+      expect(responses[0].error).toBeDefined()
+      expect(responses[0].error!.message).toContain('Session not found')
+    })
+
+    it('should unregister observer for session', async () => {
+      // Create and observe session on Peer B
+      const createResponse = await peerB.server.handleRequest({
+        jsonrpc: '2.0',
+        id: 'create-3',
+        method: 'session/new',
+        params: {},
+      })
+      const sessionId = (createResponse.result as { sessionId: string }).sessionId
+
+      // First observe
+      peerA.adapter.send('peer-b', {
+        jsonrpc: '2.0',
+        id: 'observe-2',
+        method: 'session/observe',
+        params: { sessionId },
+      })
+      await new Promise((r) => setTimeout(r, 50))
+
+      // Then unobserve
+      const unobserveRequest: AcpRequest = {
+        jsonrpc: '2.0',
+        id: 'unobserve-1',
+        method: 'session/unobserve',
+        params: { sessionId },
+      }
+
+      const responses: AcpResponse[] = []
+      peerA.adapter.onMessage((msg) => {
+        if ('id' in msg && msg.id === 'unobserve-1') {
+          responses.push(msg as AcpResponse)
+        }
+      })
+
+      peerA.adapter.send('peer-b', unobserveRequest)
+      await new Promise((r) => setTimeout(r, 100))
+
+      expect(responses.length).toBe(1)
+      const result = responses[0].result as { success: boolean }
+      expect(result.success).toBe(true)
+    })
+  })
 })

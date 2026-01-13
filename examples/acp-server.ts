@@ -389,6 +389,8 @@ interface LegacySession {
   id: string
   createdAt: Date
   mode: string
+  active: boolean
+  activity?: string
   history: Array<{ role: 'user' | 'assistant'; content: string }>
 }
 
@@ -417,8 +419,33 @@ interface ToolCall {
 }
 
 /**
- * Legacy ACP server for backward compatibility with existing tests.
- * Use ExampleAcpAgent with AgentSideConnection for new code.
+ * @deprecated Use ExampleAcpAgent with AgentSideConnection instead.
+ * This legacy server is maintained only for backward compatibility with existing tests.
+ *
+ * Migration example:
+ * ```typescript
+ * // Old (deprecated):
+ * const server = new ExampleAcpServer()
+ * adapter.onRequest(async (req, from, respond) => {
+ *   const res = await server.handleRequest(req)
+ *   respond(res)
+ * })
+ *
+ * // New (recommended):
+ * import { AgentSideConnection } from '@agentclientprotocol/sdk'
+ * import { meshStream } from 'agentic-mesh'
+ *
+ * const stream = meshStream(mesh, { peerId: 'client' })
+ * const conn = new AgentSideConnection(
+ *   (c) => new ExampleAcpAgent(c),
+ *   stream
+ * )
+ * ```
+ *
+ * Benefits of ExampleAcpAgent:
+ * - Uses official SDK types for better type safety
+ * - SDK handles JSON-RPC framing automatically
+ * - Better protocol compliance
  */
 export class ExampleAcpServer extends EventEmitter {
   private sessions: Map<string, LegacySession> = new Map()
@@ -512,6 +539,7 @@ export class ExampleAcpServer extends EventEmitter {
       id: sessionId,
       createdAt: new Date(),
       mode: 'default',
+      active: true,
       history: [],
     }
     this.sessions.set(sessionId, session)
@@ -572,11 +600,18 @@ export class ExampleAcpServer extends EventEmitter {
     return { success: true }
   }
 
-  private async handleSessionList(_params: unknown): Promise<unknown> {
-    const sessions = Array.from(this.sessions.values()).map((session) => ({
+  private async handleSessionList(params: unknown): Promise<unknown> {
+    const { includeInactive } = (params as { includeInactive?: boolean }) || {}
+    const allSessions = Array.from(this.sessions.values())
+    const filteredSessions = includeInactive
+      ? allSessions
+      : allSessions.filter((s) => s.active)
+    const sessions = filteredSessions.map((session) => ({
       sessionId: session.id,
       createdAt: session.createdAt.toISOString(),
       mode: session.mode,
+      active: session.active,
+      activity: session.activity,
     }))
     return { sessions }
   }
