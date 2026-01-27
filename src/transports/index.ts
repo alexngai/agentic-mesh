@@ -21,3 +21,11 @@ export type {
 
 // Transport implementations
 export { NebulaTransport } from './nebula'
+export {
+  TailscaleTransport,
+  TailscaleCLI,
+  type TailscalePeer,
+  type TailscaleSelfStatus,
+  type TailscaleStatus,
+  type TailscalePeerInfo,
+} from './tailscale'
