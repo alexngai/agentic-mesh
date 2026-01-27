@@ -9,8 +9,7 @@ import * as fs from 'fs/promises'
 import * as path from 'path'
 import { SyncProvider } from './provider'
 import { MessageChannel } from '../channel/message-channel'
-import type { YjsSyncConfig, PeerInfo, MeshContext } from '../types'
-import type { NebulaMesh } from '../mesh/nebula-mesh'
+import type { YjsSyncConfig, PeerInfo, MeshContext, IMessageChannel } from '../types'
 
 // Message type constants
 const MSG_SYNC_STEP_1 = 0
@@ -28,7 +27,7 @@ const DEFAULT_SNAPSHOT_INTERVAL = 60000 // 1 minute
 
 export class YjsSyncProvider extends SyncProvider {
   readonly doc: Y.Doc
-  private channel: MessageChannel<YjsWireMessage> | null = null
+  private channel: IMessageChannel<YjsWireMessage> | null = null
   private _synced = false
   private _syncing = false
   private syncedPeers: Set<string> = new Set()
@@ -56,8 +55,7 @@ export class YjsSyncProvider extends SyncProvider {
     await this.mesh.registerNamespace(this.namespace)
 
     // Create channel for Yjs messages
-    const meshInstance = this.mesh as NebulaMesh
-    this.channel = meshInstance.createChannel<YjsWireMessage>(`sync:yjs:${this.namespace}`)
+    this.channel = this.mesh.createChannel<YjsWireMessage>(`sync:yjs:${this.namespace}`)
     await this.channel.open()
 
     // Listen for incoming messages

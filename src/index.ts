@@ -4,7 +4,16 @@
 // Core exports
 export { NebulaMesh } from './mesh'
 export { HealthMonitor } from './mesh/health-monitor'
-export type { HealthMonitorConfig, PeerHealth, HealthChangeEvent } from './mesh/health-monitor'
+export type { HealthMonitorConfig } from './mesh/health-monitor'
+
+// Health Monitor Adapter (Phase 5: Pluggable Health Monitoring)
+export { NoopHealthMonitor } from './mesh/health-adapter'
+export type {
+  HealthMonitorAdapter,
+  HealthMonitorEvents,
+  HealthChangeEvent,
+  PeerHealth,
+} from './mesh/health-adapter'
 export { ExecutionRouter } from './mesh/execution-router'
 export type {
   ExecutionRequest,
@@ -119,6 +128,21 @@ export type {
   SessionEndedNotification,
 } from './acp'
 
+// Transport types (Phase 10: Pluggable Transports)
+export type {
+  PeerEndpoint,
+  PeerConnection,
+  TransportEvents,
+  TransportAdapter,
+  BaseTransportConfig,
+  NebulaTransportConfig,
+  TailscaleTransportConfig,
+  HeadscaleTransportConfig,
+  TcpTransportConfig,
+  TransportConfig,
+  TransportFactory,
+} from './transports'
+
 // Type exports
 export type {
   // Hub types
@@ -131,6 +155,9 @@ export type {
   // Mesh config
   NebulaMeshConfig,
   MeshContext,
+  IMessageChannel,
+  // Optional features (Phase 5)
+  OptionalFeaturesConfig,
   // Channel types
   MessageChannelConfig,
   QueuedMessage,

@@ -3,6 +3,10 @@
 
 import { EventEmitter } from 'events'
 import type { PeerInfo, PeerStatus } from '../types'
+import type { HealthMonitorAdapter, PeerHealth, HealthChangeEvent } from './health-adapter'
+
+// Re-export types for backward compatibility
+export type { PeerHealth, HealthChangeEvent } from './health-adapter'
 
 export interface HealthMonitorConfig {
   /** Heartbeat interval in milliseconds. Default: 10000 (10s) */
@@ -13,28 +17,15 @@ export interface HealthMonitorConfig {
   offlineThreshold?: number
 }
 
-export interface PeerHealth {
-  peerId: string
-  status: PeerStatus
-  lastSeen: Date
-  lastPing: Date | null
-  missedHeartbeats: number
-  /** Whether this peer is the current hub */
-  isHub: boolean
-}
-
-export interface HealthChangeEvent {
-  peerId: string
-  previousStatus: PeerStatus
-  newStatus: PeerStatus
-  missedHeartbeats: number
-}
-
 const DEFAULT_HEARTBEAT_INTERVAL = 10000 // 10 seconds
 const DEFAULT_SUSPECT_THRESHOLD = 2 // After 2 missed heartbeats (20s)
 const DEFAULT_OFFLINE_THRESHOLD = 3 // After 3 missed heartbeats (30s)
 
-export class HealthMonitor extends EventEmitter {
+/**
+ * Default TCP ping/pong-based health monitor.
+ * Implements the HealthMonitorAdapter interface.
+ */
+export class HealthMonitor extends EventEmitter implements HealthMonitorAdapter {
   private readonly heartbeatInterval: number
   private readonly suspectThreshold: number
   private readonly offlineThreshold: number

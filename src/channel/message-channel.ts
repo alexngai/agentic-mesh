@@ -2,8 +2,7 @@
 // Implements: s-9689
 
 import { EventEmitter } from 'events'
-import type { MessageChannelConfig, PeerInfo, ChannelStats } from '../types'
-import type { NebulaMesh } from '../mesh/nebula-mesh'
+import type { MessageChannelConfig, PeerInfo, ChannelStats, MeshContext } from '../types'
 import { OfflineQueue } from './offline-queue'
 
 // Error types for RPC
@@ -39,7 +38,7 @@ type RequestHandler<T> = (message: T, from: PeerInfo) => Promise<unknown>
 
 export class MessageChannel<T = unknown> extends EventEmitter {
   readonly name: string
-  private mesh: NebulaMesh
+  private mesh: MeshContext
   private config: Required<Omit<MessageChannelConfig, 'requiredGroups'>> & {
     requiredGroups: string[]
   }
@@ -58,7 +57,7 @@ export class MessageChannel<T = unknown> extends EventEmitter {
   private requestHandler: RequestHandler<T> | null = null
   private requestCounter = 0
 
-  constructor(mesh: NebulaMesh, name: string, config?: MessageChannelConfig) {
+  constructor(mesh: MeshContext, name: string, config?: MessageChannelConfig) {
     super()
     this.mesh = mesh
     this.name = name
@@ -299,10 +298,10 @@ export class MessageChannel<T = unknown> extends EventEmitter {
   }
 
   // ==========================================================================
-  // Receiving (called by NebulaMesh)
+  // Receiving (called by mesh implementation)
   // ==========================================================================
 
-  /** @internal - Called by NebulaMesh when a message arrives */
+  /** @internal - Called by mesh when a message arrives */
   _receiveMessage(message: T, from: PeerInfo): void {
     // Check permission if required groups are configured
     if (!this.checkSenderPermission(from)) {
@@ -320,7 +319,7 @@ export class MessageChannel<T = unknown> extends EventEmitter {
     this.emit('message', message, from)
   }
 
-  /** @internal - Called by NebulaMesh when an RPC request arrives */
+  /** @internal - Called by mesh when an RPC request arrives */
   async _receiveRequest(message: T, from: PeerInfo, requestId: string): Promise<void> {
     // Check permission
     if (!this.checkSenderPermission(from)) {
@@ -372,7 +371,7 @@ export class MessageChannel<T = unknown> extends EventEmitter {
     }
   }
 
-  /** @internal - Called by NebulaMesh when an RPC response arrives */
+  /** @internal - Called by mesh when an RPC response arrives */
   _receiveResponse(response: unknown, from: PeerInfo, requestId: string): void {
     const pending = this.pendingRequests.get(requestId)
     if (!pending) {

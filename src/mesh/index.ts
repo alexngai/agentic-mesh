@@ -1,5 +1,18 @@
 export { NebulaMesh } from './nebula-mesh'
 export { ExecutionRouter } from './execution-router'
+
+// Health Monitor Adapter (Phase 5)
+export { NoopHealthMonitor } from './health-adapter'
+export type {
+  HealthMonitorAdapter,
+  HealthMonitorEvents,
+  HealthChangeEvent,
+  PeerHealth,
+} from './health-adapter'
+
+// Health Monitor (default implementation)
+export { HealthMonitor } from './health-monitor'
+export type { HealthMonitorConfig } from './health-monitor'
 export type {
   ExecutionRequest,
   ExecutionResponse,

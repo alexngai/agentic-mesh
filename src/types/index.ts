@@ -1,5 +1,57 @@
 // agentic-mesh type definitions
 
+// Re-export transport types for convenience
+export type { PeerEndpoint } from '../transports/types'
+
+// =============================================================================
+// Optional Features Configuration (Phase 5)
+// =============================================================================
+
+/**
+ * Configuration for optional mesh features.
+ * These features can be disabled for simpler deployments or when using
+ * transports that provide their own implementations.
+ */
+export interface OptionalFeaturesConfig {
+  /**
+   * Enable hub election for centralized coordination.
+   * When disabled, no hub is elected and hub-specific features are skipped.
+   * Default: true
+   */
+  hubElection?: boolean
+
+  /**
+   * Enable health monitoring with heartbeats.
+   * When disabled, no ping/pong health checks are performed.
+   * Use 'transport' to delegate to the transport's built-in health monitoring.
+   * Default: true
+   */
+  healthMonitoring?: boolean | 'transport'
+
+  /**
+   * Enable namespace registry for tracking which peers participate in which namespaces.
+   * When disabled, namespace registration messages are not sent/processed.
+   * Only useful when hub election is also enabled.
+   * Default: true
+   */
+  namespaceRegistry?: boolean
+
+  /**
+   * Enable hub relay for peers that cannot connect directly.
+   * When disabled, messages to unreachable peers will fail.
+   * Requires hub election to be enabled.
+   * Default: true
+   */
+  hubRelay?: boolean
+
+  /**
+   * Enable offline queue for messages to offline peers.
+   * When disabled, messages to offline peers are dropped.
+   * Default: true
+   */
+  offlineQueue?: boolean
+}
+
 // =============================================================================
 // Discovery Types (Phase 7.2)
 // =============================================================================
@@ -19,6 +71,8 @@ export interface NebulaAutoConfigOptions {
   discoveryInterval?: number
   /** Path to nebula-cert binary (default: 'nebula-cert') */
   nebulaCertPath?: string
+  /** Optional features configuration (Phase 5) */
+  features?: OptionalFeaturesConfig
 }
 
 // =============================================================================
@@ -65,11 +119,24 @@ export interface HubState {
 
 export type PeerStatus = 'online' | 'offline' | 'unknown'
 
+import type { PeerEndpoint } from '../transports/types'
+
 export interface PeerInfo {
   id: string
   name?: string
+  /**
+   * @deprecated Use endpoint.address instead. Kept for backward compatibility.
+   */
   nebulaIp: string
+  /**
+   * @deprecated Use endpoint.port instead. Kept for backward compatibility.
+   */
   port?: number
+  /**
+   * Transport-agnostic endpoint information.
+   * New code should use this instead of nebulaIp/port.
+   */
+  endpoint?: PeerEndpoint
   status: PeerStatus
   lastSeen: Date
   groups: string[]
@@ -85,9 +152,20 @@ export interface PeerInfo {
 
 export interface PeerConfig {
   id: string
+  /**
+   * @deprecated Use endpoint.address instead. Will be removed in v1.0.0.
+   */
   nebulaIp: string
   name?: string
+  /**
+   * @deprecated Use endpoint.port instead. Will be removed in v1.0.0.
+   */
   port?: number // Override default port for this peer
+  /**
+   * Transport-agnostic endpoint information (recommended).
+   * New code should use this instead of nebulaIp/port.
+   */
+  endpoint?: PeerEndpoint
 }
 
 export interface NebulaMeshConfig {
@@ -127,6 +205,12 @@ export interface NebulaMeshConfig {
    * Default: true
    */
   compressionEnabled?: boolean
+
+  /**
+   * Optional features configuration (Phase 5).
+   * Configure which optional features are enabled.
+   */
+  features?: OptionalFeaturesConfig
 }
 
 // =============================================================================
@@ -301,24 +385,116 @@ export type ChannelEventType = 'message' | 'error'
 export type SyncEventType = 'synced' | 'syncing' | 'error' | 'update' | 'peer:synced'
 
 // =============================================================================
-// Mesh Context (provided to SyncProviders)
+// Mesh Context (provided to SyncProviders and MessageChannels)
 // =============================================================================
 
+/**
+ * Generic channel interface for type-safe channel creation.
+ * This avoids circular imports with MessageChannel.
+ */
+export interface IMessageChannel<T = unknown> {
+  readonly name: string
+  readonly isOpen: boolean
+  open(): Promise<void>
+  close(): Promise<void>
+  send(peerId: string, message: T): boolean
+  broadcast(message: T): void
+
+  // RPC methods
+  request<R>(peerId: string, message: T, timeout?: number): Promise<R>
+  onRequest(handler: (message: T, from: PeerInfo) => Promise<unknown>): void
+  offRequest(): void
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  on(event: string | symbol, listener: (...args: any[]) => void): this
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  off(event: string | symbol, listener: (...args: any[]) => void): this
+}
+
+/**
+ * MeshContext is the primary interface for interacting with the mesh network.
+ * It provides transport-agnostic access to peer management, hub election,
+ * namespace registry, and channel creation.
+ *
+ * This interface is implemented by NebulaMesh and future transport implementations.
+ * MessageChannel and SyncProviders depend on this interface, not concrete implementations.
+ */
 export interface MeshContext {
-  // Hub info
+  // ========== Hub Info ==========
+
+  /** Get the current hub peer, or null if no hub elected */
   getActiveHub(): PeerInfo | null
+
+  /** Check if this peer is the current hub */
   isHub(): boolean
 
-  // Peer info
+  // ========== Peer Info ==========
+
+  /** Get all known peers */
   getPeers(): PeerInfo[]
+
+  /** Get info about the local peer */
   getSelf(): PeerInfo
 
-  // Namespace registry
+  /** Get info about a specific peer by ID */
+  getPeer?(id: string): PeerInfo | null
+
+  // ========== Namespace Registry ==========
+
+  /** Register interest in a namespace for sync */
   registerNamespace(namespace: string): Promise<void>
+
+  /** Unregister from a namespace */
   unregisterNamespace(namespace: string): Promise<void>
+
+  /** Get all active namespaces and their participating peers */
   getActiveNamespaces(): Map<string, string[]>
 
-  // Events - uses EventEmitter signatures
+  // ========== Channel Factory ==========
+
+  /**
+   * Create or get a message channel by name.
+   * Channels are cached - calling with the same name returns the existing channel.
+   *
+   * @param name Unique channel name
+   * @param config Optional channel configuration
+   * @returns MessageChannel instance
+   */
+  createChannel<T>(name: string, config?: MessageChannelConfig): IMessageChannel<T>
+
+  // ========== Internal Transport Operations ==========
+  // These are used internally by MessageChannel and should not be called directly.
+
+  /**
+   * @internal Send a message to a specific peer on a channel.
+   * @returns true if sent, false if peer not connected
+   */
+  _sendToPeer<T>(peerId: string, channelName: string, message: T): boolean
+
+  /**
+   * @internal Broadcast a message to all connected peers on a channel.
+   */
+  _broadcast<T>(channelName: string, message: T): void
+
+  /**
+   * @internal Send an RPC message (request or response) to a peer.
+   * @returns true if sent, false if peer not connected
+   */
+  _sendRpc<T>(
+    peerId: string,
+    channelName: string,
+    message: T,
+    type: 'request' | 'response',
+    requestId: string
+  ): boolean
+
+  /**
+   * @internal Get the local peer ID.
+   */
+  _getPeerId(): string
+
+  // ========== Events ==========
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   on(event: string | symbol, listener: (...args: any[]) => void): this
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
