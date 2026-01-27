@@ -119,6 +119,21 @@ export type {
   SessionEndedNotification,
 } from './acp'
 
+// Transport types (Phase 10: Pluggable Transports)
+export type {
+  PeerEndpoint,
+  PeerConnection,
+  TransportEvents,
+  TransportAdapter,
+  BaseTransportConfig,
+  NebulaTransportConfig,
+  TailscaleTransportConfig,
+  HeadscaleTransportConfig,
+  TcpTransportConfig,
+  TransportConfig,
+  TransportFactory,
+} from './transports'
+
 // Type exports
 export type {
   // Hub types
@@ -131,6 +146,7 @@ export type {
   // Mesh config
   NebulaMeshConfig,
   MeshContext,
+  IMessageChannel,
   // Channel types
   MessageChannelConfig,
   QueuedMessage,

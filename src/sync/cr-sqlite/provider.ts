@@ -4,8 +4,7 @@
 import Database from 'better-sqlite3'
 import { SyncProvider } from '../provider'
 import { MessageChannel } from '../../channel'
-import type { MeshContext, PeerInfo } from '../../types'
-import type { NebulaMesh } from '../../mesh/nebula-mesh'
+import type { MeshContext, PeerInfo, IMessageChannel } from '../../types'
 import { getExtensionPath } from './extension-loader'
 import {
   CrSqliteSyncConfig,
@@ -38,7 +37,7 @@ interface DbWireMessage {
 export class CrSqliteSyncProvider extends SyncProvider {
   private config: CrSqliteSyncConfig
   private db: Database.Database | null = null
-  private channel: MessageChannel<DbWireMessage> | null = null
+  private channel: IMessageChannel<DbWireMessage> | null = null
   private pollTimer: NodeJS.Timeout | null = null
   private snapshotTimer: NodeJS.Timeout | null = null
 
@@ -83,8 +82,7 @@ export class CrSqliteSyncProvider extends SyncProvider {
       this.localVersion = this.getCurrentVersion()
 
       // 5. Create message channel
-      const meshInstance = this.mesh as NebulaMesh
-      this.channel = meshInstance.createChannel<DbWireMessage>(`db:${this.namespace}`)
+      this.channel = this.mesh.createChannel<DbWireMessage>(`db:${this.namespace}`)
       await this.channel.open()
       this.setupMessageHandlers()
 
