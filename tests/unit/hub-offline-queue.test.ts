@@ -115,12 +115,10 @@ describe('Hub Offline Queue Coordination', () => {
     })
 
     it('should forward directly when target is connected', () => {
-      // Create a mock socket
-      const mockSocket = {
-        destroyed: false,
-        write: vi.fn(),
-      }
-      ;(hubMesh as any).connections.set('peer-b', mockSocket)
+      // Mock transport to simulate connected peer
+      const sendFn = vi.fn().mockReturnValue(true)
+      vi.spyOn((hubMesh as any).transport, 'isConnected').mockReturnValue(true)
+      vi.spyOn((hubMesh as any).transport, 'send').mockImplementation(sendFn)
 
       const relayMsg: RelayMessage = {
         type: 'relay',
@@ -135,7 +133,7 @@ describe('Hub Offline Queue Coordination', () => {
       ;(hubMesh as any).handleRelayRequest(relayMsg)
 
       // Should forward, not queue
-      expect(mockSocket.write).toHaveBeenCalled()
+      expect(sendFn).toHaveBeenCalled()
       expect(hubMesh.getRelayStats().messagesRelayed).toBe(1)
       expect(hubMesh.getRelayStats().messagesQueuedForRelay).toBe(0)
     })
@@ -178,18 +176,16 @@ describe('Hub Offline Queue Coordination', () => {
 
       expect(hubMesh.getHubQueueStats()!.total).toBe(2)
 
-      // Now peer-b connects
-      const mockSocket = {
-        destroyed: false,
-        write: vi.fn(),
-      }
-      ;(hubMesh as any).connections.set('peer-b', mockSocket)
+      // Now peer-b connects - mock transport
+      const sendFn = vi.fn().mockReturnValue(true)
+      vi.spyOn((hubMesh as any).transport, 'isConnected').mockReturnValue(true)
+      vi.spyOn((hubMesh as any).transport, 'send').mockImplementation(sendFn)
 
       // Flush queued messages
       ;(hubMesh as any).flushQueuedRelayMessages('peer-b')
 
-      // Should have written both messages
-      expect(mockSocket.write).toHaveBeenCalledTimes(2)
+      // Should have sent both messages
+      expect(sendFn).toHaveBeenCalledTimes(2)
 
       // Queue should be empty
       expect(hubMesh.getHubQueueStats()!.total).toBe(0)
@@ -212,12 +208,9 @@ describe('Hub Offline Queue Coordination', () => {
 
       ;(hubMesh as any).handleRelayRequest(relayMsg)
 
-      // Connect peer-b and flush
-      const mockSocket = {
-        destroyed: false,
-        write: vi.fn(),
-      }
-      ;(hubMesh as any).connections.set('peer-b', mockSocket)
+      // Connect peer-b and flush - mock transport
+      vi.spyOn((hubMesh as any).transport, 'isConnected').mockReturnValue(true)
+      vi.spyOn((hubMesh as any).transport, 'send').mockReturnValue(true)
       ;(hubMesh as any).flushQueuedRelayMessages('peer-b')
 
       expect(flushedHandler).toHaveBeenCalledWith({
@@ -240,16 +233,14 @@ describe('Hub Offline Queue Coordination', () => {
 
       ;(hubMesh as any).handleRelayRequest(relayMsg)
 
-      // peer-c connects (not peer-b)
-      const mockSocket = {
-        destroyed: false,
-        write: vi.fn(),
-      }
-      ;(hubMesh as any).connections.set('peer-c', mockSocket)
+      // peer-c connects (not peer-b) - mock transport
+      const sendFn = vi.fn().mockReturnValue(true)
+      vi.spyOn((hubMesh as any).transport, 'isConnected').mockReturnValue(true)
+      vi.spyOn((hubMesh as any).transport, 'send').mockImplementation(sendFn)
       ;(hubMesh as any).flushQueuedRelayMessages('peer-c')
 
-      // Should not write anything (no messages for peer-c)
-      expect(mockSocket.write).not.toHaveBeenCalled()
+      // Should not send anything (no messages for peer-c)
+      expect(sendFn).not.toHaveBeenCalled()
 
       // Queue should still have the message for peer-b
       expect(hubMesh.getHubQueueStats()!.total).toBe(1)
@@ -259,16 +250,15 @@ describe('Hub Offline Queue Coordination', () => {
       // Mock isHub to return false
       vi.spyOn(hubMesh, 'isHub').mockReturnValue(false)
 
-      const mockSocket = {
-        destroyed: false,
-        write: vi.fn(),
-      }
-      ;(hubMesh as any).connections.set('peer-b', mockSocket)
+      // Mock transport
+      const sendFn = vi.fn().mockReturnValue(true)
+      vi.spyOn((hubMesh as any).transport, 'isConnected').mockReturnValue(true)
+      vi.spyOn((hubMesh as any).transport, 'send').mockImplementation(sendFn)
 
       // This should do nothing
       ;(hubMesh as any).flushQueuedRelayMessages('peer-b')
 
-      expect(mockSocket.write).not.toHaveBeenCalled()
+      expect(sendFn).not.toHaveBeenCalled()
     })
   })
 
@@ -330,18 +320,16 @@ describe('Hub Offline Queue Coordination', () => {
 
       ;(hubMesh as any).handleRelayRequest(relayMsg)
 
-      // Connect peer-b and flush
-      const mockSocket = {
-        destroyed: false,
-        write: vi.fn(),
-      }
-      ;(hubMesh as any).connections.set('peer-b', mockSocket)
+      // Connect peer-b and flush - mock transport
+      const sendFn = vi.fn().mockReturnValue(true)
+      vi.spyOn((hubMesh as any).transport, 'isConnected').mockReturnValue(true)
+      vi.spyOn((hubMesh as any).transport, 'send').mockImplementation(sendFn)
       ;(hubMesh as any).flushQueuedRelayMessages('peer-b')
 
       // Check that requestId was preserved
-      expect(mockSocket.write).toHaveBeenCalledTimes(1)
-      const writtenData = mockSocket.write.mock.calls[0][0]
-      const msg = JSON.parse(writtenData.replace('\n', ''))
+      expect(sendFn).toHaveBeenCalledTimes(1)
+      const writtenData = sendFn.mock.calls[0][1] // second arg is the data buffer
+      const msg = JSON.parse(writtenData.toString().replace('\n', ''))
       expect(msg.requestId).toBe('req-123')
       expect(msg.messageType).toBe('request')
     })

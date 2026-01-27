@@ -611,7 +611,7 @@ describe('NebulaTransport', () => {
       }
     })
 
-    it('should emit error event on connection failure', async () => {
+    it('should return false on connection failure without error event', async () => {
       // Create transport with short timeout
       const shortTimeoutTransport = new NebulaTransport({
         type: 'nebula',
@@ -622,21 +622,23 @@ describe('NebulaTransport', () => {
       await shortTimeoutTransport.start()
 
       try {
-        const errorPromise = new Promise<Error>((resolve) => {
-          shortTimeoutTransport.on('error', (err) => {
-            resolve(err as Error)
-          })
+        // Track if error was emitted
+        let errorEmitted = false
+        shortTimeoutTransport.on('error', () => {
+          errorEmitted = true
         })
 
         // Try to connect to non-existent peer
-        shortTimeoutTransport.connect({
+        const result = await shortTimeoutTransport.connect({
           peerId: 'nonexistent',
           address: '127.0.0.1',
           port: 59999,
         })
 
-        const error = await errorPromise
-        expect(error.message).toContain('nonexistent')
+        // Should return false on failure
+        expect(result).toBe(false)
+        // Should not emit error event (connection failures are expected)
+        expect(errorEmitted).toBe(false)
       } finally {
         await shortTimeoutTransport.stop()
       }

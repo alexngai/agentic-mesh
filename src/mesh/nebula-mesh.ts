@@ -1,4 +1,4 @@
-// NebulaMesh - Core transport layer
+// NebulaMesh - Core mesh layer
 // Implements: s-65f6
 
 import { EventEmitter } from 'events'
@@ -35,6 +35,8 @@ import {
   type DiscoveryPeerInfo,
   discoveryPeerToPeerConfig,
 } from './peer-discovery'
+import { NebulaTransport } from '../transports/nebula'
+import type { PeerEndpoint } from '../transports/types'
 
 const DEFAULT_PORT = 7946
 const DEFAULT_CONNECTION_TIMEOUT = 30000
@@ -51,8 +53,6 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   > &
     NebulaMeshConfig
   private peers: Map<string, PeerInfo> = new Map()
-  private connections: Map<string, net.Socket> = new Map()
-  private server: net.Server | null = null
   private channels: Map<string, MessageChannel<unknown>> = new Map()
   private namespaces: Set<string> = new Set()
   private _connected = false
@@ -61,6 +61,12 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   private namespaceRegistry: NamespaceRegistry
   private healthMonitor: HealthMonitor
   private serializer: SerializerManager
+
+  // Phase 10: Pluggable Transport
+  private transport: NebulaTransport
+  private peerBuffers: Map<string, string> = new Map() // Buffer per peer for message parsing
+  private incomingBuffers: Map<string, string> = new Map() // Buffer for incoming connections (before handshake)
+  private incomingSockets: Map<string, net.Socket> = new Map() // Temporary storage for incoming sockets
 
   // Phase 7.2: Peer Discovery
   private peerDiscovery: PeerDiscovery | null = null
@@ -108,6 +114,17 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       format: config.serialization ?? 'auto',
       compression: config.compressionEnabled ?? true,
     })
+
+    // Initialize transport (Phase 10)
+    this.transport = new NebulaTransport({
+      type: 'nebula',
+      nebulaIp: this.config.nebulaIp,
+      port: this.config.port,
+      connectionTimeout: this.config.connectionTimeout,
+    })
+
+    // Set up transport event handlers
+    this.setupTransportHandlers()
 
     // Handle health monitor events
     this.healthMonitor.on('health:changed', (event: HealthChangeEvent) => {
@@ -163,6 +180,270 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
     // Initialize peer info from config
     for (const peerConfig of config.peers) {
       this.peers.set(peerConfig.id, this.peerConfigToInfo(peerConfig))
+    }
+  }
+
+  // ==========================================================================
+  // Transport Event Handlers (Phase 10)
+  // ==========================================================================
+
+  private setupTransportHandlers(): void {
+    // Handle incoming connections (before handshake identifies the peer)
+    this.transport.on('connection', (socket: net.Socket, info: { address: string; port: number }) => {
+      const tempId = `incoming:${info.address}:${info.port}`
+      this.incomingSockets.set(tempId, socket)
+      this.incomingBuffers.set(tempId, '')
+    })
+
+    // Handle peer connected (after we initiate connection)
+    this.transport.on('peer:connected', (peerId: string, endpoint: PeerEndpoint) => {
+      // Initialize buffer for this peer
+      this.peerBuffers.set(peerId, '')
+
+      // Send handshake to identify ourselves
+      this.sendHandshakeToPeer(peerId)
+    })
+
+    // Handle peer disconnected
+    this.transport.on('peer:disconnected', (peerId: string) => {
+      if (!this._disconnecting) {
+        this.handlePeerDisconnect(peerId)
+      }
+      this.peerBuffers.delete(peerId)
+    })
+
+    // Handle incoming data
+    this.transport.on('data', (peerId: string, data: Buffer) => {
+      if (this._disconnecting) return
+
+      // Check if this is from an identified peer or an incoming connection
+      if (peerId.startsWith('incoming:')) {
+        this.handleIncomingData(peerId, data)
+      } else {
+        this.handlePeerData(peerId, data)
+      }
+    })
+
+    // Handle transport errors
+    this.transport.on('error', (error: Error) => {
+      if (!this._disconnecting) {
+        this.emit('error', error)
+      }
+    })
+  }
+
+  /**
+   * Handle data from an incoming connection (before handshake).
+   */
+  private handleIncomingData(tempId: string, data: Buffer): void {
+    let buffer = this.incomingBuffers.get(tempId) ?? ''
+    buffer += data.toString()
+
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    this.incomingBuffers.set(tempId, buffer)
+
+    for (const line of lines) {
+      if (!line.trim()) continue
+
+      try {
+        const msg = JSON.parse(line)
+
+        if (msg.type === 'handshake') {
+          const socket = this.incomingSockets.get(tempId)
+          if (socket) {
+            this.handleIncomingHandshake(tempId, socket, msg)
+          }
+        }
+        // Other messages before handshake are ignored
+      } catch (err) {
+        if (!this._disconnecting) {
+          console.error('Failed to parse incoming message:', err)
+        }
+      }
+    }
+  }
+
+  /**
+   * Handle data from an identified peer.
+   */
+  private handlePeerData(peerId: string, data: Buffer): void {
+    let buffer = this.peerBuffers.get(peerId) ?? ''
+    buffer += data.toString()
+
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    this.peerBuffers.set(peerId, buffer)
+
+    for (const line of lines) {
+      if (!line.trim()) continue
+
+      try {
+        const msg = JSON.parse(line)
+
+        // Handle handshake response from peer we connected to
+        if (msg.type === 'handshake') {
+          this.processHandshake(peerId, msg)
+        } else {
+          this.handleMessage(peerId, msg)
+        }
+      } catch (err) {
+        if (!this._disconnecting) {
+          console.error('Failed to parse message:', err)
+        }
+      }
+    }
+  }
+
+  /**
+   * Handle handshake from an incoming connection.
+   */
+  private handleIncomingHandshake(
+    tempId: string,
+    socket: net.Socket,
+    msg: {
+      peerId: string
+      peerName?: string
+      groups?: string[]
+      namespaces?: string[]
+      hubRole?: HubRole
+      hubPriority?: number
+      serialization?: SerializerCapabilities
+    }
+  ): void {
+    const peerId = msg.peerId
+
+    // Clean up temporary storage
+    this.incomingSockets.delete(tempId)
+    this.incomingBuffers.delete(tempId)
+
+    // Handle simultaneous connection race condition:
+    // If we already have a connection to this peer (from our outgoing connection),
+    // use a tie-breaker to decide which connection to keep.
+    // The peer with the lexicographically larger ID keeps its outgoing connection.
+    if (this.transport.isConnected(peerId)) {
+      if (this.config.peerId > peerId) {
+        // We have larger ID, keep our outgoing connection, reject incoming
+        socket.destroy()
+        return
+      }
+      // They have larger ID, they keep their outgoing (our incoming)
+      // We'll accept this incoming connection and let transport replace the old one
+    }
+
+    // Identify the connection with the transport
+    const endpoint: PeerEndpoint = {
+      peerId,
+      address: socket.remoteAddress ?? 'unknown',
+      port: socket.remotePort ?? 0,
+    }
+    this.transport.identifyConnection(tempId, peerId, socket, endpoint)
+
+    // Initialize buffer for this peer
+    this.peerBuffers.set(peerId, '')
+
+    // Process the handshake
+    this.processHandshake(peerId, msg)
+
+    // Send our handshake back
+    this.sendHandshakeToPeer(peerId)
+  }
+
+  /**
+   * Send handshake to a specific peer via transport.
+   */
+  private sendHandshakeToPeer(peerId: string): void {
+    const hubConfig = this.config.hub ?? DEFAULT_HUB_CONFIG
+    const handshake = {
+      type: 'handshake',
+      peerId: this.config.peerId,
+      peerName: this.config.peerName,
+      groups: this.config.groups,
+      namespaces: Array.from(this.namespaces),
+      hubRole: hubConfig.role,
+      hubPriority: hubConfig.priority,
+      // Phase 6.2: Serialization capabilities
+      serialization: this.serializer.getCapabilities(),
+    }
+    const data = Buffer.from(JSON.stringify(handshake) + '\n')
+    this.transport.send(peerId, data)
+  }
+
+  /**
+   * Process handshake data from a peer (shared between incoming and outgoing).
+   */
+  private processHandshake(
+    peerId: string,
+    msg: {
+      peerId: string
+      peerName?: string
+      groups?: string[]
+      namespaces?: string[]
+      hubRole?: HubRole
+      hubPriority?: number
+      serialization?: SerializerCapabilities
+    }
+  ): void {
+    // Check if we already have this peer configured
+    let peer = this.peers.get(peerId)
+    const remoteAddress = this.transport.getConnection(peerId)?.handle?.remoteAddress ?? 'unknown'
+    const wasAlreadyOnline = peer?.status === 'online'
+
+    if (!peer) {
+      // Unknown peer connecting - create entry
+      peer = {
+        id: peerId,
+        name: msg.peerName,
+        nebulaIp: remoteAddress,
+        status: 'online',
+        lastSeen: new Date(),
+        groups: msg.groups ?? [],
+        activeNamespaces: msg.namespaces ?? [],
+        isHub: false,
+        hubRole: msg.hubRole,
+        hubPriority: msg.hubPriority,
+      }
+      this.peers.set(peerId, peer)
+    } else {
+      peer.status = 'online'
+      peer.lastSeen = new Date()
+      peer.name = msg.peerName ?? peer.name
+      peer.groups = msg.groups ?? peer.groups
+      peer.activeNamespaces = msg.namespaces ?? []
+      peer.hubRole = msg.hubRole ?? peer.hubRole
+      peer.hubPriority = msg.hubPriority ?? peer.hubPriority
+    }
+
+    // Phase 6.2: Negotiate serialization format
+    const remoteCapabilities = msg.serialization ?? {
+      supportedFormats: ['json'] as ('json' | 'binary')[],
+      compressionSupported: false,
+    }
+    this.serializer.negotiateFormat(peerId, remoteCapabilities)
+
+    // Only do these if peer wasn't already online (avoid duplicates)
+    if (!wasAlreadyOnline) {
+      // Notify hub election of new peer
+      this.hubElection.peerJoined(peer)
+
+      // Register peer with health monitor
+      this.healthMonitor.registerPeer(peer)
+
+      // If we're hub, register peer's namespaces and send snapshot
+      if (this.isHub()) {
+        // Register namespaces the peer advertised in handshake
+        for (const ns of msg.namespaces ?? []) {
+          this.namespaceRegistry.registerPeer(ns, peerId)
+        }
+
+        // Send current namespace state to the new peer
+        this.sendNamespaceSnapshot(peerId)
+
+        // Flush any queued relay messages for this peer (Phase 9.2)
+        this.flushQueuedRelayMessages(peerId)
+      }
+
+      this.emit('peer:joined', peer)
     }
   }
 
@@ -284,10 +565,10 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   async connect(): Promise<void> {
     if (this._connected) return
 
-    // Start TCP server for incoming connections
-    await this.startServer()
+    // Start transport (handles TCP server)
+    await this.transport.start()
 
-    // Connect to configured peers
+    // Connect to configured peers via transport
     await this.connectToPeers()
 
     this._connected = true
@@ -331,21 +612,16 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
     }
     this.channels.clear()
 
-    // Close all peer connections
-    for (const socket of this.connections.values()) {
-      socket.destroy()
-    }
-    this.connections.clear()
+    // Stop transport (closes all connections and server)
+    await this.transport.stop()
 
-    // Close server
-    if (this.server) {
-      await new Promise<void>((resolve) => {
-        this.server!.close(() => resolve())
-      })
-      this.server = null
-    }
+    // Clear buffers
+    this.peerBuffers.clear()
+    this.incomingBuffers.clear()
+    this.incomingSockets.clear()
 
     this._connected = false
+    this._disconnecting = false
     this.emit('disconnected', 'manual')
   }
 
@@ -428,11 +704,8 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       ...announcement,
     }
 
-    for (const [peerId, socket] of this.connections) {
-      if (!socket.destroyed) {
-        socket.write(JSON.stringify(msg) + '\n')
-      }
-    }
+    const data = Buffer.from(JSON.stringify(msg) + '\n')
+    this.transport.broadcast(data)
   }
 
   // ==========================================================================
@@ -495,8 +768,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
     const hubId = this.hubElection.hubId
     if (!hubId || hubId === this.config.peerId) return
 
-    const socket = this.connections.get(hubId)
-    if (!socket || socket.destroyed) return
+    if (!this.transport.isConnected(hubId)) return
 
     const msg = {
       type: action === 'register' ? 'namespace-register' : 'namespace-unregister',
@@ -504,29 +776,27 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       peerId: this.config.peerId,
     }
 
-    socket.write(JSON.stringify(msg) + '\n')
+    const data = Buffer.from(JSON.stringify(msg) + '\n')
+    this.transport.send(hubId, data)
   }
 
   /**
    * Broadcast namespace update to all peers (hub-side).
    */
   private broadcastNamespaceUpdate(update: NamespaceUpdate): void {
-    for (const [peerId, socket] of this.connections) {
-      if (!socket.destroyed) {
-        socket.write(JSON.stringify(update) + '\n')
-      }
-    }
+    const data = Buffer.from(JSON.stringify(update) + '\n')
+    this.transport.broadcast(data)
   }
 
   /**
    * Send namespace snapshot to a specific peer (hub-side).
    */
   private sendNamespaceSnapshot(peerId: string): void {
-    const socket = this.connections.get(peerId)
-    if (!socket || socket.destroyed) return
+    if (!this.transport.isConnected(peerId)) return
 
     const snapshot = this.namespaceRegistry.createSnapshot()
-    socket.write(JSON.stringify(snapshot) + '\n')
+    const data = Buffer.from(JSON.stringify(snapshot) + '\n')
+    this.transport.send(peerId, data)
   }
 
   // ==========================================================================
@@ -547,24 +817,8 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   }
 
   // ==========================================================================
-  // Internal: Networking
+  // Internal: Networking (Transport-based)
   // ==========================================================================
-
-  private async startServer(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      this.server = net.createServer((socket) => {
-        this.handleIncomingConnection(socket)
-      })
-
-      this.server.on('error', (err) => {
-        reject(err)
-      })
-
-      this.server.listen(this.config.port, this.config.nebulaIp, () => {
-        resolve()
-      })
-    })
-  }
 
   private async connectToPeers(): Promise<void> {
     const connectPromises = Array.from(this.peers.values()).map((peer) =>
@@ -578,221 +832,22 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   }
 
   private async connectToPeer(peer: PeerInfo): Promise<void> {
-    if (this.connections.has(peer.id)) return
+    if (this.transport.isConnected(peer.id)) return
 
-    return new Promise((resolve, reject) => {
-      const socket = net.createConnection(
-        {
-          host: peer.nebulaIp,
-          port: peer.port ?? this.config.port,
-          timeout: this.config.connectionTimeout,
-        },
-        () => {
-          // Send handshake
-          this.sendHandshake(socket)
-          this.setupSocket(socket, peer.id)
-          this.connections.set(peer.id, socket)
-
-          // Update peer status
-          peer.status = 'online'
-          peer.lastSeen = new Date()
-          this.emit('peer:joined', peer)
-
-          resolve()
-        }
-      )
-
-      socket.on('error', (err) => {
-        peer.status = 'offline'
-        reject(err)
-      })
-
-      socket.on('timeout', () => {
-        socket.destroy()
-        reject(new Error('Connection timeout'))
-      })
-    })
-  }
-
-  private handleIncomingConnection(socket: net.Socket): void {
-    let peerId: string | null = null
-    let buffer = ''
-
-    socket.on('data', (data) => {
-      buffer += data.toString()
-
-      // Process complete messages (newline-delimited JSON)
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        if (!line.trim()) continue
-
-        try {
-          const msg = JSON.parse(line)
-
-          if (msg.type === 'handshake') {
-            peerId = msg.peerId
-            this.handleHandshake(socket, msg)
-          } else if (peerId) {
-            this.handleMessage(peerId, msg)
-          }
-        } catch (err) {
-          // Only log errors when not disconnecting (to avoid noise during shutdown)
-          if (!this._disconnecting) {
-            console.error('Failed to parse message:', err)
-          }
-        }
-      }
-    })
-
-    socket.on('close', () => {
-      if (peerId && !this._disconnecting) {
-        this.handlePeerDisconnect(peerId)
-      }
-    })
-
-    socket.on('error', (err) => {
-      if (!this._disconnecting) {
-        console.error('Socket error:', err)
-        if (peerId) {
-          this.handlePeerDisconnect(peerId)
-        }
-      }
-    })
-  }
-
-  private setupSocket(socket: net.Socket, peerId: string): void {
-    let buffer = ''
-
-    socket.on('data', (data) => {
-      // Ignore data during disconnection
-      if (this._disconnecting) return
-
-      buffer += data.toString()
-
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        if (!line.trim()) continue
-
-        try {
-          const msg = JSON.parse(line)
-          this.handleMessage(peerId, msg)
-        } catch (err) {
-          if (!this._disconnecting) {
-            console.error('Failed to parse message:', err)
-          }
-        }
-      }
-    })
-
-    socket.on('close', () => {
-      if (!this._disconnecting) {
-        this.handlePeerDisconnect(peerId)
-      }
-    })
-
-    socket.on('error', (err) => {
-      if (!this._disconnecting) {
-        console.error(`Socket error for peer ${peerId}:`, err)
-      }
-    })
-  }
-
-  private sendHandshake(socket: net.Socket): void {
-    const hubConfig = this.config.hub ?? DEFAULT_HUB_CONFIG
-    const handshake = {
-      type: 'handshake',
-      peerId: this.config.peerId,
-      peerName: this.config.peerName,
-      groups: this.config.groups,
-      namespaces: Array.from(this.namespaces),
-      hubRole: hubConfig.role,
-      hubPriority: hubConfig.priority,
-      // Phase 6.2: Serialization capabilities
-      serialization: this.serializer.getCapabilities(),
-    }
-    socket.write(JSON.stringify(handshake) + '\n')
-  }
-
-  private handleHandshake(
-    socket: net.Socket,
-    msg: {
-      peerId: string
-      peerName?: string
-      groups?: string[]
-      namespaces?: string[]
-      hubRole?: HubRole
-      hubPriority?: number
-      serialization?: SerializerCapabilities
-    }
-  ): void {
-    const peerId = msg.peerId
-
-    // Check if we already have this peer configured
-    let peer = this.peers.get(peerId)
-
-    if (!peer) {
-      // Unknown peer connecting - create entry
-      const remoteAddress = socket.remoteAddress ?? 'unknown'
-      peer = {
-        id: peerId,
-        name: msg.peerName,
-        nebulaIp: remoteAddress,
-        status: 'online',
-        lastSeen: new Date(),
-        groups: msg.groups ?? [],
-        activeNamespaces: msg.namespaces ?? [],
-        isHub: false,
-        hubRole: msg.hubRole,
-        hubPriority: msg.hubPriority,
-      }
-      this.peers.set(peerId, peer)
-    } else {
-      peer.status = 'online'
-      peer.lastSeen = new Date()
-      peer.name = msg.peerName ?? peer.name
-      peer.groups = msg.groups ?? peer.groups
-      peer.activeNamespaces = msg.namespaces ?? []
-      peer.hubRole = msg.hubRole ?? peer.hubRole
-      peer.hubPriority = msg.hubPriority ?? peer.hubPriority
+    const endpoint: PeerEndpoint = {
+      peerId: peer.id,
+      address: peer.nebulaIp,
+      port: peer.port ?? this.config.port,
     }
 
-    this.connections.set(peerId, socket)
-
-    // Phase 6.2: Negotiate serialization format
-    const remoteCapabilities = msg.serialization ?? {
-      supportedFormats: ['json'] as ('json' | 'binary')[],
-      compressionSupported: false,
-    }
-    this.serializer.negotiateFormat(peerId, remoteCapabilities)
-
-    // Send our handshake back
-    this.sendHandshake(socket)
-
-    // Notify hub election of new peer
-    this.hubElection.peerJoined(peer)
-
-    // Register peer with health monitor
-    this.healthMonitor.registerPeer(peer)
-
-    // If we're hub, register peer's namespaces and send snapshot
-    if (this.isHub()) {
-      // Register namespaces the peer advertised in handshake
-      for (const ns of msg.namespaces ?? []) {
-        this.namespaceRegistry.registerPeer(ns, peerId)
-      }
-
-      // Send current namespace state to the new peer
-      this.sendNamespaceSnapshot(peerId)
-
-      // Flush any queued relay messages for this peer (Phase 9.2)
-      this.flushQueuedRelayMessages(peerId)
+    const success = await this.transport.connect(endpoint)
+    if (!success) {
+      peer.status = 'offline'
+      throw new Error(`Failed to connect to peer ${peer.id}`)
     }
 
-    this.emit('peer:joined', peer)
+    // Note: peer:joined event and handshake will be triggered by transport events
+    // after the connection is established and handshake completes
   }
 
   private handlePeerDisconnect(peerId: string): void {
@@ -815,7 +870,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       this.hubElection.peerLeft(peer)
       this.emit('peer:left', peer)
     }
-    this.connections.delete(peerId)
+    // Connection cleanup is handled by transport
   }
 
   // ==========================================================================
@@ -912,8 +967,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
 
   /** @internal - Used by MessageChannel */
   _sendToPeer<T>(peerId: string, channelName: string, message: T): boolean {
-    const socket = this.connections.get(peerId)
-    if (!socket || socket.destroyed) {
+    if (!this.transport.isConnected(peerId)) {
       // Try relay via hub if we're not the hub
       return this.tryRelay(peerId, channelName, message, 'message')
     }
@@ -928,25 +982,25 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       timestamp: Date.now(),
     }
 
-    socket.write(JSON.stringify(wireMsg) + '\n')
-    return true
+    const data = Buffer.from(JSON.stringify(wireMsg) + '\n')
+    return this.transport.send(peerId, data)
   }
 
   /** @internal - Used by MessageChannel */
   _broadcast<T>(channelName: string, message: T): void {
-    for (const [peerId, socket] of this.connections) {
-      if (!socket.destroyed) {
-        const wireMsg: WireMessage<T> = {
-          id: crypto.randomUUID(),
-          channel: channelName,
-          type: 'message',
-          payload: message,
-          from: this.config.peerId,
-          to: null,
-          timestamp: Date.now(),
-        }
-        socket.write(JSON.stringify(wireMsg) + '\n')
+    const connectedPeers = this.transport.getConnectedPeers()
+    for (const peerId of connectedPeers) {
+      const wireMsg: WireMessage<T> = {
+        id: crypto.randomUUID(),
+        channel: channelName,
+        type: 'message',
+        payload: message,
+        from: this.config.peerId,
+        to: null,
+        timestamp: Date.now(),
       }
+      const data = Buffer.from(JSON.stringify(wireMsg) + '\n')
+      this.transport.send(peerId, data)
     }
   }
 
@@ -958,8 +1012,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
     type: 'request' | 'response',
     requestId: string
   ): boolean {
-    const socket = this.connections.get(peerId)
-    if (!socket || socket.destroyed) {
+    if (!this.transport.isConnected(peerId)) {
       // Try relay via hub if we're not the hub
       return this.tryRelay(peerId, channelName, message, type, requestId)
     }
@@ -975,8 +1028,8 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       requestId,
     }
 
-    socket.write(JSON.stringify(wireMsg) + '\n')
-    return true
+    const data = Buffer.from(JSON.stringify(wireMsg) + '\n')
+    return this.transport.send(peerId, data)
   }
 
   /** @internal - Used by MessageChannel for request ID generation */
@@ -1099,28 +1152,28 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
    * Send a ping to a peer for health checking.
    */
   private sendPing(peerId: string): void {
-    const socket = this.connections.get(peerId)
-    if (!socket || socket.destroyed) return
+    if (!this.transport.isConnected(peerId)) return
 
     const msg = {
       type: 'ping',
       timestamp: Date.now(),
     }
-    socket.write(JSON.stringify(msg) + '\n')
+    const data = Buffer.from(JSON.stringify(msg) + '\n')
+    this.transport.send(peerId, data)
   }
 
   /**
    * Send a pong response to a peer.
    */
   private sendPong(peerId: string): void {
-    const socket = this.connections.get(peerId)
-    if (!socket || socket.destroyed) return
+    if (!this.transport.isConnected(peerId)) return
 
     const msg = {
       type: 'pong',
       timestamp: Date.now(),
     }
-    socket.write(JSON.stringify(msg) + '\n')
+    const data = Buffer.from(JSON.stringify(msg) + '\n')
+    this.transport.send(peerId, data)
   }
 
   /**
@@ -1170,8 +1223,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       return false
     }
 
-    const hubSocket = this.connections.get(hubId)
-    if (!hubSocket || hubSocket.destroyed) {
+    if (!this.transport.isConnected(hubId)) {
       return false
     }
 
@@ -1187,7 +1239,8 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       timestamp: Date.now(),
     }
 
-    hubSocket.write(JSON.stringify(relayMsg) + '\n')
+    const data = Buffer.from(JSON.stringify(relayMsg) + '\n')
+    this.transport.send(hubId, data)
     this.emit('relay:sent', { to: peerId, channel: channelName, via: hubId })
     return true
   }
@@ -1199,8 +1252,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
   private handleRelayRequest<T>(msg: RelayMessage<T>): void {
     this.relayStats.relayRequestsReceived++
 
-    const targetSocket = this.connections.get(msg.to)
-    if (!targetSocket || targetSocket.destroyed) {
+    if (!this.transport.isConnected(msg.to)) {
       // Target not connected - queue for later delivery
       if (this.hubOfflineQueue) {
         this.hubOfflineQueue.enqueue(msg.channel, msg, msg.to)
@@ -1222,13 +1274,13 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
     }
 
     // Forward the message to target as a 'relayed' message
-    this.forwardRelayMessage(msg, targetSocket)
+    this.forwardRelayMessage(msg)
   }
 
   /**
    * Forward a relay message to the target peer.
    */
-  private forwardRelayMessage<T>(msg: RelayMessage<T>, targetSocket: net.Socket): void {
+  private forwardRelayMessage<T>(msg: RelayMessage<T>): void {
     const relayedMsg = {
       type: 'relayed',
       originalFrom: msg.from,
@@ -1239,7 +1291,8 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       timestamp: msg.timestamp,
     }
 
-    targetSocket.write(JSON.stringify(relayedMsg) + '\n')
+    const data = Buffer.from(JSON.stringify(relayedMsg) + '\n')
+    this.transport.send(msg.to, data)
     this.relayStats.messagesRelayed++
     this.emit('relay:forwarded', {
       from: msg.from,
@@ -1256,8 +1309,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       return
     }
 
-    const targetSocket = this.connections.get(peerId)
-    if (!targetSocket || targetSocket.destroyed) {
+    if (!this.transport.isConnected(peerId)) {
       return
     }
 
@@ -1271,7 +1323,7 @@ export class NebulaMesh extends EventEmitter implements MeshContext {
       }
 
       const msg = op.message as RelayMessage
-      this.forwardRelayMessage(msg, targetSocket)
+      this.forwardRelayMessage(msg)
       this.hubOfflineQueue.dequeue(op.id)
       flushed++
     }

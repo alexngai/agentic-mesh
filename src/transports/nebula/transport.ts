@@ -273,10 +273,9 @@ export class NebulaTransport extends EventEmitter implements TransportAdapter {
         }
       )
 
-      socket.on('error', (err) => {
-        if (!this._stopping) {
-          this.emit('error', new Error(`Connection to ${peerId} failed: ${err.message}`))
-        }
+      socket.on('error', () => {
+        // Connection failures are expected when peers aren't online yet.
+        // Don't emit error - just return false and let the caller handle it.
         resolve(false)
       })
 
