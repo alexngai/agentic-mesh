@@ -19,5 +19,5 @@ export type {
   TransportFactory,
 } from './types'
 
-// Re-export Nebula transport (when implemented)
-// export { NebulaTransport } from './nebula'
+// Transport implementations
+export { NebulaTransport } from './nebula'
