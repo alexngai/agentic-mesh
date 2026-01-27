@@ -29,3 +29,11 @@ export {
   type TailscaleStatus,
   type TailscalePeerInfo,
 } from './tailscale'
+export {
+  HeadscaleTransport,
+  HeadscaleCLI,
+  type HeadscaleConfig,
+  type HeadscaleNode,
+  type HeadscaleUser,
+  type HeadscalePreAuthKey,
+} from './headscale'
