@@ -24,6 +24,8 @@ export { NebulaTransport } from './nebula'
 export {
   TailscaleTransport,
   TailscaleCLI,
+  TailscaleHealthMonitor,
+  type TailscaleHealthMonitorConfig,
   type TailscalePeer,
   type TailscaleSelfStatus,
   type TailscaleStatus,

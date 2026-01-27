@@ -8,3 +8,6 @@ export {
   type TailscaleStatus,
   type TailscalePeerInfo,
 } from './cli'
+
+// Health monitor (Phase 5: Pluggable Health Monitoring)
+export { TailscaleHealthMonitor, type TailscaleHealthMonitorConfig } from './health-monitor'

@@ -4,6 +4,55 @@
 export type { PeerEndpoint } from '../transports/types'
 
 // =============================================================================
+// Optional Features Configuration (Phase 5)
+// =============================================================================
+
+/**
+ * Configuration for optional mesh features.
+ * These features can be disabled for simpler deployments or when using
+ * transports that provide their own implementations.
+ */
+export interface OptionalFeaturesConfig {
+  /**
+   * Enable hub election for centralized coordination.
+   * When disabled, no hub is elected and hub-specific features are skipped.
+   * Default: true
+   */
+  hubElection?: boolean
+
+  /**
+   * Enable health monitoring with heartbeats.
+   * When disabled, no ping/pong health checks are performed.
+   * Use 'transport' to delegate to the transport's built-in health monitoring.
+   * Default: true
+   */
+  healthMonitoring?: boolean | 'transport'
+
+  /**
+   * Enable namespace registry for tracking which peers participate in which namespaces.
+   * When disabled, namespace registration messages are not sent/processed.
+   * Only useful when hub election is also enabled.
+   * Default: true
+   */
+  namespaceRegistry?: boolean
+
+  /**
+   * Enable hub relay for peers that cannot connect directly.
+   * When disabled, messages to unreachable peers will fail.
+   * Requires hub election to be enabled.
+   * Default: true
+   */
+  hubRelay?: boolean
+
+  /**
+   * Enable offline queue for messages to offline peers.
+   * When disabled, messages to offline peers are dropped.
+   * Default: true
+   */
+  offlineQueue?: boolean
+}
+
+// =============================================================================
 // Discovery Types (Phase 7.2)
 // =============================================================================
 
@@ -22,6 +71,8 @@ export interface NebulaAutoConfigOptions {
   discoveryInterval?: number
   /** Path to nebula-cert binary (default: 'nebula-cert') */
   nebulaCertPath?: string
+  /** Optional features configuration (Phase 5) */
+  features?: OptionalFeaturesConfig
 }
 
 // =============================================================================
@@ -101,9 +152,20 @@ export interface PeerInfo {
 
 export interface PeerConfig {
   id: string
+  /**
+   * @deprecated Use endpoint.address instead. Will be removed in v1.0.0.
+   */
   nebulaIp: string
   name?: string
+  /**
+   * @deprecated Use endpoint.port instead. Will be removed in v1.0.0.
+   */
   port?: number // Override default port for this peer
+  /**
+   * Transport-agnostic endpoint information (recommended).
+   * New code should use this instead of nebulaIp/port.
+   */
+  endpoint?: PeerEndpoint
 }
 
 export interface NebulaMeshConfig {
@@ -143,6 +205,12 @@ export interface NebulaMeshConfig {
    * Default: true
    */
   compressionEnabled?: boolean
+
+  /**
+   * Optional features configuration (Phase 5).
+   * Configure which optional features are enabled.
+   */
+  features?: OptionalFeaturesConfig
 }
 
 // =============================================================================

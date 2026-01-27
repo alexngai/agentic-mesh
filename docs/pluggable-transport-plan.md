@@ -499,30 +499,121 @@ export interface MeshConfig {
 - `src/transports/headscale/api-client.ts`
 - `tests/unit/headscale-transport.test.ts`
 
-### Phase 5: Optional Enhancements
+### Phase 5: Optional Enhancements ✅ COMPLETED
 
 **Goal**: Make transport-specific features pluggable.
 
 **Tasks**:
 
-1. **Make hub election optional**
-   - Some transports may not need it
-   - Configuration flag to disable
+1. **Make hub election optional** ✅
+   - Added `features.hubElection` configuration flag
+   - When disabled, no hub is elected and hub-specific features are skipped
+   - `getActiveHub()` returns null, `isHub()` returns false
 
-2. **Make health monitoring pluggable**
-   - Default: TCP ping/pong
-   - Tailscale: Use built-in health
-   - Option to disable
+2. **Make health monitoring pluggable** ✅
+   - Created `HealthMonitorAdapter` interface
+   - `HealthMonitor`: Default TCP ping/pong implementation
+   - `NoopHealthMonitor`: Disabled health monitoring (all peers always healthy)
+   - `TailscaleHealthMonitor`: Uses Tailscale CLI for peer status
+   - Configure via `features.healthMonitoring: true | false | 'transport'`
 
-3. **Make namespace registry optional**
-   - Only needed for hub-based sync optimization
-   - Can be disabled for simpler deployments
+3. **Make namespace registry optional** ✅
+   - Added `features.namespaceRegistry` configuration flag
+   - When disabled, namespace registration messages are not sent/processed
+   - Local namespace tracking still works
 
-4. **Remove legacy `nebulaIp` fields**
-   - After migration period
-   - Major version bump
+4. **Additional optional features** ✅
+   - `features.hubRelay`: Enable/disable hub relay for unreachable peers
+   - `features.offlineQueue`: Enable/disable offline message queuing
+
+5. **Remove legacy `nebulaIp` fields** (PLANNED - Major version)
+   - See Migration Guide below
+   - Will be removed in v1.0.0
 
 **Estimated effort**: 2-3 days
+
+---
+
+## Legacy `nebulaIp` Deprecation Guide
+
+The `nebulaIp` and `port` fields on `PeerInfo` and `PeerConfig` are deprecated in favor of the transport-agnostic `endpoint` field.
+
+### Current State (v0.x)
+
+Both old and new fields are available:
+
+```typescript
+interface PeerInfo {
+  id: string
+
+  // DEPRECATED - use endpoint.address instead
+  nebulaIp: string
+  // DEPRECATED - use endpoint.port instead
+  port?: number
+
+  // NEW - transport-agnostic endpoint
+  endpoint?: PeerEndpoint
+}
+```
+
+### Migration Path
+
+#### For Library Consumers
+
+**Step 1: Update reads (now)**
+```typescript
+// Old way (deprecated)
+const ip = peer.nebulaIp
+const port = peer.port ?? 7946
+
+// New way (recommended)
+const ip = peer.endpoint?.address ?? peer.nebulaIp
+const port = peer.endpoint?.port ?? peer.port ?? 7946
+```
+
+**Step 2: Update writes (now)**
+```typescript
+// Old way (deprecated)
+const config: PeerConfig = {
+  id: 'peer-1',
+  nebulaIp: '10.0.0.1',
+  port: 7946,
+}
+
+// New way (recommended) - works now, required in v1.0
+const config: PeerConfig = {
+  id: 'peer-1',
+  nebulaIp: '10.0.0.1', // Still required for now
+  port: 7946,
+  endpoint: {
+    peerId: 'peer-1',
+    address: '10.0.0.1',
+    port: 7946,
+  },
+}
+```
+
+#### For Internal Development
+
+The `nebulaIp` field will be removed in v1.0.0:
+1. `PeerInfo.nebulaIp` → `PeerInfo.endpoint.address`
+2. `PeerInfo.port` → `PeerInfo.endpoint.port`
+3. `PeerConfig.nebulaIp` → `PeerConfig.endpoint.address`
+4. `NebulaMeshConfig.nebulaIp` → Keep as Nebula-specific
+
+### Timeline
+
+| Version | Status |
+|---------|--------|
+| v0.0.x | Both fields available, new code should use `endpoint` |
+| v0.1.x | TypeScript deprecation warnings on `nebulaIp` fields |
+| v1.0.0 | `nebulaIp` and `port` fields removed from `PeerInfo` |
+
+### Breaking Changes in v1.0.0
+
+1. `PeerInfo.nebulaIp` removed - use `PeerInfo.endpoint.address`
+2. `PeerInfo.port` removed - use `PeerInfo.endpoint.port`
+3. `PeerConfig.nebulaIp` may become optional if `endpoint` is provided
 
 ---
 
