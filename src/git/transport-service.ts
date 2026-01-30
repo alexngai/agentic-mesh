@@ -5,6 +5,7 @@
  * - Exposes HTTP endpoints for the local git-remote-mesh helper
  * - Routes git operations to remote peers via MAP messages
  * - Handles incoming git requests from remote peers
+ * - Supports binary streaming for large pack transfers
  */
 
 import { EventEmitter } from 'events'
@@ -24,9 +25,13 @@ import type {
   GitUploadPackMessage,
   GitReceivePackMessage,
   GitErrorMessage,
+  GitPackStreamMessage,
+  GitPackChunkMessage,
+  GitPackCompleteMessage,
 } from './types'
 import { DEFAULT_GIT_TRANSPORT_CONFIG } from './types'
 import { GitProtocolHandlerImpl, GitProtocolError } from './protocol-handler'
+import { PackStreamer, PackReceiver, createPackStreamer, createPackReceiver } from './pack-streamer'
 
 // =============================================================================
 // Types
@@ -42,6 +47,15 @@ export interface GitTransportServiceConfig {
   git: Partial<GitTransportConfig>
   /** Request timeout in milliseconds */
   requestTimeoutMs: number
+  /** Streaming configuration */
+  streaming: {
+    /** Enable streaming for large packs (default: true) */
+    enabled: boolean
+    /** Threshold in bytes above which to use streaming (default: 1MB) */
+    threshold: number
+    /** Chunk size for streaming (default: 64KB) */
+    chunkSize: number
+  }
 }
 
 /** Default service configuration */
@@ -50,6 +64,11 @@ export const DEFAULT_GIT_SERVICE_CONFIG: GitTransportServiceConfig = {
   httpHost: '127.0.0.1',
   git: {},
   requestTimeoutMs: 300000, // 5 minutes
+  streaming: {
+    enabled: true,
+    threshold: 1024 * 1024, // 1MB
+    chunkSize: 64 * 1024, // 64KB
+  },
 }
 
 /** Events emitted by the git transport service */
@@ -59,12 +78,23 @@ export interface GitTransportServiceEvents {
   'request:list-refs': (peerId: string, request: ListRefsRequest) => void
   'request:upload-pack': (peerId: string, request: UploadPackRequest) => void
   'request:receive-pack': (peerId: string, request: ReceivePackRequest) => void
+  'stream:started': (peerId: string, correlationId: string, totalSize: number) => void
+  'stream:progress': (peerId: string, correlationId: string, bytesTransferred: number) => void
+  'stream:completed': (peerId: string, correlationId: string, totalBytes: number) => void
   error: (error: Error) => void
 }
 
 /** Pending request tracker */
 interface PendingRequest<T> {
   resolve: (value: T) => void
+  reject: (error: Error) => void
+  timeout: ReturnType<typeof setTimeout>
+}
+
+/** Pending stream tracker */
+interface PendingStream {
+  receiver: PackReceiver
+  resolve: (data: Buffer) => void
   reject: (error: Error) => void
   timeout: ReturnType<typeof setTimeout>
 }
