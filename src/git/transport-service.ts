@@ -112,15 +112,30 @@ export interface PeerMessageSender {
 export class GitTransportService extends EventEmitter {
   private readonly config: GitTransportServiceConfig
   private readonly handler: GitProtocolHandler
+  private readonly packStreamer: PackStreamer
   private httpServer: Server | null = null
   private peerSender: PeerMessageSender | null = null
   private readonly pendingRequests = new Map<string, PendingRequest<unknown>>()
+  private readonly pendingStreams = new Map<string, PendingStream>()
   private running = false
 
   constructor(config: Partial<GitTransportServiceConfig> = {}) {
     super()
     this.config = { ...DEFAULT_GIT_SERVICE_CONFIG, ...config }
     this.handler = new GitProtocolHandlerImpl({ config: this.config.git })
+    this.packStreamer = createPackStreamer({ timeoutMs: this.config.requestTimeoutMs })
+    this.setupPackStreamerEvents()
+  }
+
+  /** Set up event handlers for pack streaming */
+  private setupPackStreamerEvents(): void {
+    this.packStreamer.on('progress', (bytesTransferred: number, totalBytes?: number) => {
+      // Progress events are emitted per-stream via pending streams
+    })
+
+    this.packStreamer.on('complete', (checksum: string, totalBytes: number) => {
+      // Completion events are handled per-stream
+    })
   }
 
   /** Get the protocol handler */
@@ -136,6 +151,10 @@ export class GitTransportService extends EventEmitter {
   /** Set the peer message sender (called by MeshPeer) */
   setPeerSender(sender: PeerMessageSender): void {
     this.peerSender = sender
+    // Configure pack streamer to use the same sender
+    this.packStreamer.setSendMessage(async (peerId, message) => {
+      await sender.sendToPeer(peerId, message)
+    })
   }
 
   // ==========================================================================
@@ -163,6 +182,13 @@ export class GitTransportService extends EventEmitter {
       pending.reject(new Error('Service stopped'))
     }
     this.pendingRequests.clear()
+
+    // Cancel all pending streams
+    for (const [id, stream] of this.pendingStreams) {
+      clearTimeout(stream.timeout)
+      stream.reject(new Error('Service stopped'))
+    }
+    this.pendingStreams.clear()
 
     // Stop HTTP server
     if (this.httpServer) {
@@ -416,6 +442,11 @@ export class GitTransportService extends EventEmitter {
     fromPeerId: string,
     message: AnyGitMessage
   ): Promise<void> {
+    // Handle streaming messages first
+    if (this.handleStreamMessage(fromPeerId, message)) {
+      return
+    }
+
     // Check if this is a response to a pending request
     const pending = this.pendingRequests.get(message.correlationId)
     if (pending) {
@@ -435,6 +466,7 @@ export class GitTransportService extends EventEmitter {
     // This is a new request from a remote peer - handle it
     try {
       let response: unknown
+      let streamPackData: Buffer | null = null
 
       switch (message.type) {
         case 'git/list-refs': {
@@ -445,7 +477,21 @@ export class GitTransportService extends EventEmitter {
 
         case 'git/upload-pack': {
           const req = message as GitUploadPackMessage
-          response = await this.handler.uploadPack(req.request)
+          const uploadResponse = await this.handler.uploadPack(req.request)
+
+          // Check if we should stream the pack data
+          if (
+            this.config.streaming.enabled &&
+            uploadResponse.packData &&
+            this.shouldStreamPack(uploadResponse.packData)
+          ) {
+            // Decode the base64 pack data
+            streamPackData = Buffer.from(uploadResponse.packData, 'base64')
+            // Send response without pack data (it will be streamed)
+            response = { ...uploadResponse, packData: undefined, streaming: true }
+          } else {
+            response = uploadResponse
+          }
           break
         }
 
@@ -466,6 +512,23 @@ export class GitTransportService extends EventEmitter {
           correlationId: message.correlationId,
           response,
         } as AnyGitMessage)
+
+        // Stream pack data if needed
+        if (streamPackData) {
+          this.emit('stream:started', fromPeerId, message.correlationId, streamPackData.length)
+          await this.packStreamer.streamPack(
+            fromPeerId,
+            message.correlationId,
+            streamPackData,
+            {
+              chunkSize: this.config.streaming.chunkSize,
+              onProgress: (bytesTransferred, totalBytes) => {
+                this.emit('stream:progress', fromPeerId, message.correlationId, bytesTransferred)
+              },
+            }
+          )
+          this.emit('stream:completed', fromPeerId, message.correlationId, streamPackData.length)
+        }
       }
     } catch (err) {
       // Send error response
@@ -479,6 +542,99 @@ export class GitTransportService extends EventEmitter {
         await this.peerSender.sendToPeer(fromPeerId, errorMessage)
       }
     }
+  }
+
+  /** Handle streaming-specific messages */
+  private handleStreamMessage(fromPeerId: string, message: AnyGitMessage): boolean {
+    switch (message.type) {
+      case 'git/pack-stream': {
+        const streamMsg = message as GitPackStreamMessage
+        // Receiving side: start collecting chunks
+        if (streamMsg.direction === 'download') {
+          this.startReceivingStream(fromPeerId, streamMsg.correlationId, streamMsg.totalSize)
+        }
+        return true
+      }
+
+      case 'git/pack-chunk': {
+        const chunkMsg = message as GitPackChunkMessage
+        const stream = this.pendingStreams.get(chunkMsg.correlationId)
+        if (stream) {
+          const chunk = Buffer.from(chunkMsg.data, 'base64')
+          stream.receiver.addChunk(chunkMsg.sequence, chunk)
+          const progress = stream.receiver.getProgress()
+          this.emit('stream:progress', fromPeerId, chunkMsg.correlationId, progress.receivedBytes)
+        }
+        return true
+      }
+
+      case 'git/pack-complete': {
+        const completeMsg = message as GitPackCompleteMessage
+        const stream = this.pendingStreams.get(completeMsg.correlationId)
+        if (stream) {
+          clearTimeout(stream.timeout)
+          this.pendingStreams.delete(completeMsg.correlationId)
+          try {
+            const data = stream.receiver.complete(completeMsg.checksum, completeMsg.totalBytes)
+            stream.resolve(data)
+            this.emit('stream:completed', fromPeerId, completeMsg.correlationId, completeMsg.totalBytes)
+          } catch (err) {
+            stream.reject(err instanceof Error ? err : new Error(String(err)))
+          }
+        }
+        return true
+      }
+
+      default:
+        return false
+    }
+  }
+
+  /** Start receiving a streamed pack */
+  private startReceivingStream(peerId: string, correlationId: string, totalSize?: number): void {
+    const receiver = createPackReceiver(totalSize)
+    const timeout = setTimeout(() => {
+      this.pendingStreams.delete(correlationId)
+      // Stream timed out - but we may already have a pending request waiting
+    }, this.config.requestTimeoutMs)
+
+    // Create a promise for the stream completion
+    const streamPromise = new Promise<Buffer>((resolve, reject) => {
+      this.pendingStreams.set(correlationId, {
+        receiver,
+        resolve,
+        reject,
+        timeout,
+      })
+    })
+
+    // Update the pending request to wait for stream
+    const pending = this.pendingRequests.get(correlationId)
+    if (pending) {
+      // The original request will be resolved with streamed data
+      streamPromise.then((packData) => {
+        // Merge pack data into the response
+        const originalResolve = pending.resolve
+        pending.resolve = (response: unknown) => {
+          const uploadResponse = response as UploadPackResponse
+          originalResolve({
+            ...uploadResponse,
+            packData: packData.toString('base64'),
+          })
+        }
+      }).catch((err) => {
+        pending.reject(err)
+      })
+    }
+
+    this.emit('stream:started', peerId, correlationId, totalSize ?? 0)
+  }
+
+  /** Check if pack data should be streamed */
+  private shouldStreamPack(packData: string): boolean {
+    // packData is base64 encoded, so actual size is ~75% of string length
+    const estimatedSize = Math.floor(packData.length * 0.75)
+    return estimatedSize >= this.config.streaming.threshold
   }
 
   private generateCorrelationId(): string {
