@@ -7,26 +7,33 @@
  * Components:
  * - GitProtocolHandler: Handles git protocol operations (upload-pack, receive-pack)
  * - GitTransportService: HTTP server for git-remote-mesh helper + peer routing
+ * - GitSyncClient: High-level sync API for agents
  * - git-remote-mesh: CLI helper that git spawns for mesh:// URLs
  *
- * Usage:
+ * Usage (via standard git commands):
+ * ```bash
+ * # Add mesh remote pointing to a peer
+ * git remote add peer-b mesh://peer-b-id/
+ *
+ * # Fetch/push as normal
+ * git fetch peer-b
+ * git push peer-b main
+ * ```
+ *
+ * Usage (via GitSyncClient for agents):
  * ```typescript
- * import { createGitTransportService, createGitProtocolHandler } from 'agentic-mesh/git'
+ * // Get sync client from MeshPeer
+ * const client = peer.git.createSyncClient('/path/to/repo')
  *
- * // Create and start the git transport service
- * const gitService = createGitTransportService({
- *   httpPort: 3456,
- *   git: {
- *     repoPath: '/path/to/repo',
- *   },
- * })
+ * // Sync with remote peer
+ * await client.sync('peer-b', { branch: 'main', bidirectional: true })
  *
- * await gitService.start()
+ * // Or individual operations
+ * await client.pull('peer-b', 'main')
+ * await client.push('peer-b', 'feature-branch')
  *
- * // Users can now use:
- * // git remote add peer mesh://remote-peer-id
- * // git fetch peer main
- * // git push peer feature-branch
+ * // Clone from peer
+ * await client.clone('peer-b', '/path/to/new/repo')
  * ```
  */
 
@@ -51,3 +58,23 @@ export {
   type GitTransportServiceEvents,
   type PeerMessageSender,
 } from './transport-service'
+
+// Sync client
+export {
+  GitSyncClient,
+  createGitSyncClient,
+  type SyncOptions,
+  type SyncResult,
+  type CloneOptions,
+  type PushOptions,
+  type PullOptions,
+  type GitSyncClientEvents,
+} from './sync-client'
+
+// Pack streamer (for advanced use)
+export {
+  PackStreamer,
+  PackReceiver,
+  createPackStreamer,
+  createPackReceiver,
+} from './pack-streamer'

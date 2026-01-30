@@ -32,6 +32,7 @@ import type {
 import { DEFAULT_GIT_TRANSPORT_CONFIG } from './types'
 import { GitProtocolHandlerImpl, GitProtocolError } from './protocol-handler'
 import { PackStreamer, PackReceiver, createPackStreamer, createPackReceiver } from './pack-streamer'
+import { GitSyncClient, createGitSyncClient } from './sync-client'
 
 // =============================================================================
 // Types
@@ -146,6 +147,25 @@ export class GitTransportService extends EventEmitter {
   /** Whether the service is running */
   get isRunning(): boolean {
     return this.running
+  }
+
+  /** Get the HTTP port the service is running on */
+  get httpPort(): number {
+    return this.config.httpPort
+  }
+
+  /**
+   * Create a sync client for a specific repository.
+   * Use this for high-level git sync operations.
+   *
+   * @example
+   * ```typescript
+   * const client = gitService.createSyncClient('/path/to/repo')
+   * await client.sync('peer-id', { branch: 'main' })
+   * ```
+   */
+  createSyncClient(repoPath: string): GitSyncClient {
+    return createGitSyncClient(repoPath, this, this.config.httpPort)
   }
 
   /** Set the peer message sender (called by MeshPeer) */
