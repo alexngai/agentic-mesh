@@ -1,6 +1,0 @@
-[submodule "references/sudocode"]
-	path = references/sudocode
-	url = https://github.com/sudocode-ai/sudocode.git
-[submodule "multi-agent-protocol"]
-	path = multi-agent-protocol
-	url = https://github.com/multi-agent-protocol/multi-agent-protocol.git
