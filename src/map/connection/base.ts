@@ -18,7 +18,7 @@ import {
   PROTOCOL_ERROR_CODES,
   type MAPError,
   type RequestId,
-} from '../../multi-agent-protocol/ts-sdk/src/types'
+} from '../types'
 
 /**
  * Pending request awaiting a response.
@@ -316,7 +316,7 @@ export class BaseConnection extends EventEmitter {
       const result = await this.requestHandler(frame.method, frame.params, frame.id)
       await this.respond(frame.id, result)
     } catch (err) {
-      const error = err as Error & { code?: number; data?: unknown }
+      const error = err as Error & { code?: number; data?: Record<string, unknown> }
       await this.respondWithError(frame.id, {
         code: error.code ?? PROTOCOL_ERROR_CODES.INTERNAL_ERROR,
         message: error.message,

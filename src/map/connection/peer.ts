@@ -11,6 +11,7 @@ import type {
   AgentId,
   ParticipantId,
   Message,
+  MessageMeta,
   Event,
   MapConnectionState,
   MapPeerConnectionConfig,
@@ -179,7 +180,7 @@ export class PeerConnection extends EventEmitter {
   /**
    * Send a message to a remote agent.
    */
-  async sendMessage(to: AgentId, payload: unknown, meta?: Record<string, unknown>): Promise<void> {
+  async sendMessage(to: AgentId, payload: unknown, meta?: MessageMeta): Promise<void> {
     if (!this.connection?.isConnected) {
       throw new Error('Not connected to peer')
     }

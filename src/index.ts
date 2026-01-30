@@ -128,6 +128,9 @@ export type {
   SessionEndedNotification,
 } from './acp'
 
+// MAP Protocol integration (Multi-Agent Protocol)
+export * from './map'
+
 // Transport types (Phase 10: Pluggable Transports)
 export type {
   PeerEndpoint,

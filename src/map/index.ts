@@ -19,5 +19,11 @@ export * from './server'
 // Built-in agents
 export * from './agents'
 
+// Client bridge (external WebSocket access)
+export * from './bridge'
+
+// Federation (cross-mesh communication)
+export * from './federation'
+
 // Main entry point
 export * from './mesh-peer'
