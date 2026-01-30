@@ -26,6 +26,10 @@ import {
 } from '../types'
 import { BaseConnection } from './base'
 import { TunnelStream } from '../stream/tunnel-stream'
+import type { AnyGitMessage } from '../../git/types'
+
+/** Git message notification method */
+const GIT_MESSAGE_METHOD = 'git/message' as const
 
 /**
  * Events emitted by a peer connection.
@@ -40,6 +44,7 @@ export interface PeerConnectionEvents {
   'error': (error: Error) => void
   'reconnecting': (attempt: number) => void
   'reconnected': () => void
+  'git:message': (message: AnyGitMessage) => void
 }
 
 /**
@@ -216,6 +221,18 @@ export class PeerConnection extends EventEmitter {
   }
 
   /**
+   * Send a git protocol message to the remote peer.
+   */
+  async sendGitMessage(message: AnyGitMessage): Promise<void> {
+    if (!this.connection?.isConnected) {
+      throw new Error('Not connected to peer')
+    }
+
+    // Send as a notification (fire-and-forget for git messages)
+    await this.connection.notify(GIT_MESSAGE_METHOD, { message })
+  }
+
+  /**
    * Discover agents on the remote peer.
    */
   async discoverAgents(): Promise<Agent[]> {
@@ -271,6 +288,12 @@ export class PeerConnection extends EventEmitter {
       case NOTIFICATION_METHODS.EVENT: {
         const { event } = params as { event: Event }
         this.handleEvent(event)
+        break
+      }
+
+      case GIT_MESSAGE_METHOD: {
+        const { message } = params as { message: AnyGitMessage }
+        this.emit('git:message', message)
         break
       }
     }
