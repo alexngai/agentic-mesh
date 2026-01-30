@@ -255,6 +255,13 @@ export class ScopeManager extends EventEmitter {
   }
 
   /**
+   * Get child scopes of a parent scope.
+   */
+  getChildren(parentId: ScopeId): Scope[] {
+    return Array.from(this.scopes.values()).filter((s) => s.parent === parentId)
+  }
+
+  /**
    * Get or create a scope (useful for ad-hoc scopes).
    */
   getOrCreate(scopeId: ScopeId, params?: Omit<ScopeCreateParams, 'scopeId'>): Scope {

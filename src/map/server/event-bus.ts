@@ -180,6 +180,11 @@ export class EventBus extends EventEmitter {
     options?: SubscriptionOptions,
     participantId?: ParticipantId
   ): boolean {
+    // Check excludeOwnEvents first (before any filter checks)
+    if (options?.excludeOwnEvents && event.source === participantId) {
+      return false
+    }
+
     if (!filter) return true
 
     // Filter by event type
@@ -252,11 +257,6 @@ export class EventBus extends EventEmitter {
       for (const [key, value] of Object.entries(filter.metadataMatch)) {
         if (metadata[key] !== value) return false
       }
-    }
-
-    // Exclude own events
-    if (options?.excludeOwnEvents && event.source === participantId) {
-      return false
     }
 
     return true
