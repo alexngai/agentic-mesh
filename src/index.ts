@@ -131,6 +131,9 @@ export type {
 // MAP Protocol integration (Multi-Agent Protocol)
 export * from './map'
 
+// Git transport (for MAP git sync)
+export * from './git'
+
 // Transport types (Phase 10: Pluggable Transports)
 export type {
   PeerEndpoint,

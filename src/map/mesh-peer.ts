@@ -29,6 +29,12 @@ import { AgentConnection, createAgentConnection } from './connection/agent'
 import { PeerConnection, createPeerConnection } from './connection/peer'
 import { TunnelStream } from './stream/tunnel-stream'
 import { BaseConnection } from './connection/base'
+import {
+  GitTransportService,
+  createGitTransportService,
+  type PeerMessageSender,
+} from '../git/transport-service'
+import type { AnyGitMessage } from '../git/types'
 
 /**
  * Factory for creating transport adapters.
@@ -48,6 +54,7 @@ export class MeshPeer extends EventEmitter {
   private transportFactory: TransportFactory | null = null
   private readonly peerConnections = new Map<string, PeerConnection>()
   private readonly agentConnections = new Map<AgentId, AgentConnection>()
+  private gitService: GitTransportService | null = null
   private running = false
 
   constructor(config: MeshPeerConfig, transportFactory?: TransportFactory) {
@@ -63,6 +70,18 @@ export class MeshPeer extends EventEmitter {
       systemName: config.peerName,
       ...config.map,
     })
+
+    // Initialize git transport if enabled
+    if (config.git?.enabled) {
+      this.gitService = createGitTransportService({
+        httpPort: config.git.httpPort ?? 3456,
+        httpHost: config.git.httpHost ?? '127.0.0.1',
+        git: {
+          ...config.git.options,
+          repoPath: config.git.repoPath ?? process.cwd(),
+        },
+      })
+    }
 
     this.setupServerEvents()
   }
@@ -88,6 +107,13 @@ export class MeshPeer extends EventEmitter {
     return Array.from(this.peerConnections.keys()).filter(
       (id) => this.peerConnections.get(id)?.isConnected
     )
+  }
+
+  /**
+   * Get the git transport service (if enabled).
+   */
+  get git(): GitTransportService | null {
+    return this.gitService
   }
 
   /**
@@ -141,6 +167,12 @@ export class MeshPeer extends EventEmitter {
     // Start MAP server
     await this.mapServer.start()
 
+    // Start git transport service if enabled
+    if (this.gitService) {
+      this.gitService.setPeerSender(this.createGitPeerSender())
+      await this.gitService.start()
+    }
+
     // Connect to initial peers
     if (this.config.peers) {
       for (const endpoint of this.config.peers) {
@@ -159,6 +191,11 @@ export class MeshPeer extends EventEmitter {
    */
   async stop(): Promise<void> {
     if (!this.running) return
+
+    // Stop git transport service
+    if (this.gitService) {
+      await this.gitService.stop()
+    }
 
     // Disconnect from all peers
     for (const [peerId, conn] of this.peerConnections) {
@@ -182,6 +219,26 @@ export class MeshPeer extends EventEmitter {
 
     this.running = false
     this.emit('stopped')
+  }
+
+  /**
+   * Create a peer message sender for git transport.
+   */
+  private createGitPeerSender(): PeerMessageSender {
+    return {
+      sendToPeer: async (peerId: string, message: AnyGitMessage): Promise<void> => {
+        const conn = this.peerConnections.get(peerId)
+        if (!conn) {
+          throw new Error(`Peer ${peerId} not connected`)
+        }
+        // Send git message via the peer connection's message channel
+        await conn.sendGitMessage(message)
+      },
+      isConnected: (peerId: string): boolean => {
+        const conn = this.peerConnections.get(peerId)
+        return conn?.isConnected ?? false
+      },
+    }
   }
 
   /**
@@ -292,6 +349,15 @@ export class MeshPeer extends EventEmitter {
     conn.on('message', (message) => {
       // Forward messages to local agents
       this.handleRemoteMessage(peerId, message)
+    })
+
+    conn.on('git:message', (gitMessage) => {
+      // Forward git messages to git service
+      if (this.gitService) {
+        this.gitService.handleRemoteMessage(peerId, gitMessage).catch((err) => {
+          this.emit('error', err)
+        })
+      }
     })
 
     conn.on('error', (error) => {

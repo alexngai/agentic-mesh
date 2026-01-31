@@ -1106,6 +1106,19 @@ export interface MeshPeerConfig {
     keyPath?: string
     groups?: string[]
   }
+  /** Git transport configuration */
+  git?: {
+    /** Enable git transport (default: false) */
+    enabled?: boolean
+    /** HTTP port for git-remote-mesh helper (default: 3456) */
+    httpPort?: number
+    /** HTTP host (default: 127.0.0.1) */
+    httpHost?: string
+    /** Repository path (default: cwd) */
+    repoPath?: string
+    /** Git transport options */
+    options?: import('../git/types').GitTransportConfig
+  }
 }
 
 /**
