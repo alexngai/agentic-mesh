@@ -25,3 +25,6 @@ npm-debug.log*
 
 # Coverage
 coverage/
+
+# External reference (previously submodule)
+multi-agent-protocol/
