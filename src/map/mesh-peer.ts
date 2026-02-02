@@ -429,8 +429,8 @@ export class MeshPeer extends EventEmitter {
     this.agentConnections.set(conn.agentId, conn)
 
     // Clean up when agent is unregistered
-    conn.on('unregistered', () => {
-      this.agentConnections.delete(conn.agentId)
+    conn.on('unregistered', (agent) => {
+      this.agentConnections.delete(agent.id)
     })
 
     return conn
