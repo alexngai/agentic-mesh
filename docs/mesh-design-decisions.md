@@ -1,6 +1,6 @@
 # Mesh Design Decisions & Open Questions
 
-This document captures design decisions, open questions, alternatives considered, and deferred items from the agentic-mesh and sudocode mesh integration design process.
+This document captures design decisions, open questions, alternatives considered, and deferred items from the agentic-mesh design process. agentic-mesh has evolved from a CRDT sync library into a transport coordination layer for multi-agent systems.
 
 ---
 
@@ -18,9 +18,10 @@ This document captures design decisions, open questions, alternatives considered
 
 | Decision | Choice | Rationale | Alternatives Considered |
 |----------|--------|-----------|------------------------|
-| Transport | Nebula (hard dependency) | Proven at scale, strong security, NAT traversal | Tailscale, ZeroTier, WireGuard, plain WebRTC |
-| CRDT | Yjs (hard dependency) | Best performance, mature, good TS support | Automerge, custom CRDT |
-| Nebula binary | External install required | Avoids binary distribution complexity | Embedded/bundled binary |
+| Transport | Pluggable via `TransportAdapter` (Nebula, Tailscale, Headscale) | Different deployments need different transports | Single transport, plain WebRTC |
+| Agent protocols | ACP SDK + MAP server | Direct support for major agent coordination protocols | Custom protocol only |
+| CRDT | Yjs + cr-sqlite | In-memory and persistent sync options | Automerge, custom CRDT |
+| Transport binary | External install required | Avoids binary distribution complexity | Embedded/bundled binary |
 
 ### Identity & Certificates
 
@@ -90,13 +91,12 @@ This document captures design decisions, open questions, alternatives considered
 
 ## Primary Use Case Clarification
 
-**Decided:** The primary use case is **single user expanding to multiple nodes for resource scaling** (laptop + cloud VMs + CI runners). Team collaboration is secondary.
+**Current focus:** agentic-mesh serves as a **transport coordination layer for multi-agent systems**. The primary consumer is [multi-agent-protocol](https://github.com/multi-agent-protocol/multi-agent-protocol), which uses agentic-mesh for encrypted P2P connectivity between MAP clients, agents, and peers.
 
-This affects design in several ways:
-- Credential propagation is simpler (user controls all nodes)
-- Direct connection for onboarding (no need for lighthouse-mediated invites initially)
-- Hub is for sync anchor, not multi-tenant isolation
-- Permission tiers are simpler (admin for self, read-only for others)
+Secondary use cases include:
+- Single user scaling workloads across machines (laptop + cloud VMs + CI runners)
+- CRDT-based state synchronization for collaborative applications
+- Git repository sync over encrypted tunnels
 
 ---
 
@@ -146,6 +146,19 @@ This affects design in several ways:
 
 ---
 
+## Implemented Features (Previously Deferred)
+
+These features were originally deferred but have since been implemented:
+
+| Feature | Status | Implementation |
+|---------|--------|---------------|
+| Pluggable transport | **Implemented** | `TransportAdapter` interface with Nebula, Tailscale, Headscale |
+| Agent protocol support | **Implemented** | ACP adapter (`src/acp/`) and MAP server (`src/map/`) |
+| Git transport | **Implemented** | `git-remote-mesh://` protocol (`src/git/`) |
+| Optional features | **Implemented** | `OptionalFeaturesConfig` for hub election, health monitoring, etc. |
+| Pluggable health monitoring | **Implemented** | `HealthMonitorAdapter` interface, `NoopHealthMonitor` |
+| Serialization negotiation | **Implemented** | JSON/MessagePack negotiation in `src/channel/serializers/` |
+
 ## Deferred Features
 
 ### Definitely Later
@@ -155,22 +168,20 @@ This affects design in several ways:
 | Auto git sync | Adds complexity; git push/pull is explicit |
 | Availability pools | Need explicit routing first |
 | Live migration | Complex state transfer |
-| Slack app integration | Integration layer, not core |
-| Webhook gateway | Integration layer, not core |
-| Dynamic permissions (ACL) | Static certs work for MVP |
-| Lighthouse-mediated invites | Direct connection works for single-user |
-| Embedded nebula binary | External install is simpler |
-| Scoped hubs (per-project) | Single hub sufficient initially |
-| Pluggable transport | Nebula-only for now |
-| Alternative CRDTs | Yjs-only for now |
+| Alternative CRDTs (Automerge) | Yjs sufficient for current use cases |
+| Awareness/presence layer | Separate ephemeral channel likely needed |
+| Certificate auto-renewal | Start manual; add if friction is high |
+| Dual-transport mode | Running Nebula + Tailscale simultaneously |
+| Dynamic permissions (ACL) | Static certs work for current usage |
 
 ### Maybe Never
 
 | Feature | Reason |
 |---------|--------|
 | Full traffic routing through hub | Defeats P2P benefits |
-| Automatic hub election | Adds distributed consensus complexity |
-| Application-specific logic in agentic-mesh | Should stay in consumer |
+| Automatic hub election (Raft) | Adds distributed consensus complexity |
+| Agent-specific logic in agentic-mesh | Should stay in consumer (MAP, ACP agents) |
+| Embedded transport binary | External install is simpler and more maintainable |
 
 ---
 
@@ -340,38 +351,41 @@ This affects design in several ways:
 
 ---
 
-## Implementation Priority
+## Implementation History
 
-### Phase 1: agentic-mesh Core
+### Phase 1-4: Core (Complete)
 
 1. CertManager (CA, signing, config generation)
 2. NebulaMesh (peer connection, health)
-3. Basic MessageChannel (send, broadcast)
-4. NebulaSyncProvider (Yjs sync)
-
-### Phase 2: agentic-mesh Features
-
+3. MessageChannel (send, broadcast, RPC)
+4. YjsSyncProvider (Yjs CRDT sync)
 5. Hub management (priority, failover)
 6. Offline queue (persistence, drain)
-7. Request/response pattern
+7. CrSqliteSyncProvider (SQLite CRDT sync)
 8. CLI helpers
 
-### Phase 3: sudocode Integration
+### Phase 5: Optional Features (Complete)
 
-9. SudocodeMeshService
-10. CRDT schema for entities
-11. JSONL sync
-12. `sudocode mesh` CLI commands
+9. Pluggable health monitoring (`HealthMonitorAdapter`)
+10. Optional hub election, namespace registry, hub relay
+11. Serialization negotiation (JSON/MessagePack)
 
-### Phase 4: Execution Routing
+### Phase 6-9: Integrations (Complete)
 
-13. Execution message handlers
-14. Remote execution flow
-15. `sudocode exec --peer` flag
+12. SudocodeMeshService integration
+13. Peer discovery via Nebula lighthouses
+14. Hub relay and offline queuing
+15. Execution router and streaming
 
-### Phase 5: Polish
+### Phase 10: Transport Abstraction (Complete)
 
-16. Error handling improvements
-17. Logging/debugging tools
-18. Documentation
-19. Tests
+16. `TransportAdapter` interface
+17. Nebula, Tailscale, Headscale transport implementations
+18. Transport-agnostic `PeerEndpoint`
+
+### Phase 11: Agent Protocol Support (Complete)
+
+19. ACP integration (`AcpMeshAdapter`, `meshStream`)
+20. MAP server (agents, scopes, events, routing, federation)
+21. Git transport (`git-remote-mesh://`)
+22. TunnelStream for NDJSON over encrypted transport

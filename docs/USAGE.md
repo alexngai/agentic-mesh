@@ -8,6 +8,10 @@ This guide covers setup, configuration, and API usage for agentic-mesh.
 - [Nebula Setup](#nebula-setup)
 - [Certificate Management](#certificate-management)
 - [NebulaMesh API](#nebulamesh-api)
+- [Transport Abstraction](#transport-abstraction)
+- [Agent Control Protocol (ACP)](#agent-control-protocol-acp)
+- [Multi-Agent Protocol (MAP)](#multi-agent-protocol-map)
+- [Git Transport](#git-transport)
 - [CRDT Synchronization](#crdt-synchronization)
 - [SQLite CRDT Synchronization](#sqlite-crdt-synchronization)
 - [Message Channels](#message-channels)
@@ -281,6 +285,233 @@ mesh.on('error', (error) => {
   console.error('Mesh error:', error)
 })
 ```
+
+---
+
+## Transport Abstraction
+
+agentic-mesh supports pluggable transports via the `TransportAdapter` interface. This enables switching between Nebula, Tailscale, and Headscale without changing application code.
+
+### TransportAdapter Interface
+
+All transports implement a common interface:
+
+```typescript
+import type { TransportAdapter, PeerEndpoint } from 'agentic-mesh'
+
+interface TransportAdapter {
+  readonly type: string
+  readonly active: boolean
+
+  start(): Promise<void>
+  stop(): Promise<void>
+
+  connect(endpoint: PeerEndpoint): Promise<boolean>
+  disconnect(peerId: string): Promise<void>
+  getConnectedPeers(): string[]
+  isConnected(peerId: string): boolean
+
+  send(peerId: string, data: Uint8Array): boolean
+  broadcast(data: Uint8Array): void
+  getLocalEndpoint(): PeerEndpoint
+}
+```
+
+### Transport-Agnostic Peer Addressing
+
+```typescript
+interface PeerEndpoint {
+  peerId: string
+  address: string       // IP, URL, etc.
+  port?: number
+  metadata?: Record<string, unknown>
+}
+```
+
+### Optional Features
+
+Mesh features can be toggled via configuration:
+
+```typescript
+const mesh = new NebulaMesh({
+  peerId: 'alice',
+  nebulaIp: '10.42.0.10',
+  features: {
+    hubElection: true,           // Enable/disable hub selection
+    healthMonitoring: true,      // true | false | 'transport'
+    namespaceRegistry: true,     // Enable/disable namespace tracking
+    hubRelay: true,              // Enable/disable hub relay
+    offlineQueue: true,          // Enable/disable offline message queuing
+  },
+})
+```
+
+When `healthMonitoring` is set to `'transport'`, health checks are delegated to the transport implementation (e.g., Tailscale CLI for peer status).
+
+### Pluggable Health Monitoring
+
+```typescript
+import { NoopHealthMonitor, HealthMonitor } from 'agentic-mesh'
+
+// Default: TCP ping/pong
+const monitor = new HealthMonitor(config)
+
+// Disabled: all peers always considered healthy
+const noop = new NoopHealthMonitor()
+
+// Transport-delegated: uses transport's built-in health checks
+// Configured via features.healthMonitoring = 'transport'
+```
+
+---
+
+## Agent Control Protocol (ACP)
+
+agentic-mesh integrates with the [Agent Control Protocol](https://github.com/anthropics/agent-control-protocol) via `AcpMeshAdapter` and `meshStream`, enabling ACP agents to communicate over encrypted mesh tunnels.
+
+### AcpMeshAdapter
+
+Bridges ACP JSON-RPC messages to mesh transport:
+
+```typescript
+import { NebulaMesh, AcpMeshAdapter } from 'agentic-mesh'
+
+const mesh = new NebulaMesh({ /* config */ })
+await mesh.connect()
+
+const adapter = new AcpMeshAdapter(mesh)
+await adapter.start()
+
+// Handle incoming ACP requests from remote peers
+adapter.onRequest(async (request, from, respond) => {
+  console.log(`ACP request from ${from.id}: ${request.method}`)
+  const response = await myAgent.handleRequest(request)
+  respond(response)
+})
+
+// Handle all incoming messages (requests + notifications)
+adapter.onMessage((message, from) => {
+  console.log(`Message from ${from.id}`)
+})
+
+// Send ACP request to specific peer
+const response = await adapter.request(peerId, acpRequest, timeout)
+
+// Broadcast notification to all peers
+adapter.broadcast(notification)
+
+await adapter.stop()
+```
+
+### meshStream
+
+Creates ACP SDK-compatible streams for use with `AgentSideConnection`:
+
+```typescript
+import { meshStream, createConnectedStreams } from 'agentic-mesh'
+import { AgentSideConnection } from '@agentclientprotocol/sdk'
+
+// Create a stream connected to a specific peer
+const stream = meshStream(mesh, { peerId: 'client-peer' })
+
+// Use with ACP SDK
+const connection = new AgentSideConnection(
+  (conn) => new MyAcpAgent(conn),
+  stream
+)
+
+// For testing: create a pair of connected streams
+const { clientStream, serverStream } = createConnectedStreams()
+```
+
+### Type Guards
+
+```typescript
+import {
+  isAcpRequest,
+  isAcpResponse,
+  isAcpNotification,
+  isSessionObserveRequest,
+  isSessionListRequest,
+} from 'agentic-mesh'
+
+if (isAcpRequest(message)) {
+  // Handle request
+} else if (isAcpNotification(message)) {
+  // Handle notification
+}
+```
+
+---
+
+## Multi-Agent Protocol (MAP)
+
+agentic-mesh includes a MAP server implementation for agent orchestration. The [multi-agent-protocol SDK](https://github.com/multi-agent-protocol/multi-agent-protocol) uses agentic-mesh as an optional peer dependency for mesh transport.
+
+### MAP Server
+
+```typescript
+import { MapServer } from 'agentic-mesh'
+
+const mapServer = new MapServer({
+  systemId: 'my-system',
+  federation: { enabled: true },
+})
+```
+
+The MAP server provides:
+- **AgentRegistry** — Agent lifecycle management
+- **ScopeManager** — Scope creation and deletion
+- **EventBus** — Event distribution to subscribers
+- **MessageRouter** — Message routing between agents and peers
+
+### How multi-agent-protocol Uses agentic-mesh
+
+MAP clients and agents can connect over mesh using `connectMesh()`:
+
+```typescript
+import { ClientConnection } from '@multi-agent-protocol/sdk'
+
+const client = await ClientConnection.connectMesh({
+  transport,                                                    // agentic-mesh TransportAdapter
+  peer: { peerId: 'server', address: '10.0.0.1', port: 4242 }, // Remote peer
+  localPeerId: 'my-client',
+  name: 'MeshClient',
+  reconnection: true,
+})
+
+// Use MAP protocol normally
+const agents = await client.listAgents()
+const subscription = await client.subscribe({
+  eventTypes: ['agent.registered', 'agent.state.changed'],
+})
+```
+
+The SDK wraps agentic-mesh's `TunnelStream` into MAP-compatible `ReadableStream`/`WritableStream` via `agenticMeshStream()`.
+
+---
+
+## Git Transport
+
+agentic-mesh provides a git remote helper for syncing repositories over encrypted mesh tunnels.
+
+### Usage
+
+```bash
+# Clone a repository from a mesh peer
+git clone git-remote-mesh://peer-id/repository
+
+# Push to a mesh peer
+git push git-remote-mesh://peer-id/repository main
+```
+
+### Components
+
+- **`git-remote-mesh`** — Git remote helper binary (registered via package.json `bin`)
+- **`GitTransportService`** — Service handling git protocol operations
+- **`ProtocolHandler`** — Git protocol implementation
+- **`PackStreamer`** — Streams pack files over encrypted tunnels
+- **`GitSyncClient`** — Client for initiating git sync operations
 
 ---
 

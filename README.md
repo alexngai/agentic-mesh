@@ -1,22 +1,29 @@
 # agentic-mesh
 
-P2P CRDT synchronization library over Nebula mesh networks.
+Transport coordination and configuration layer for multi-agent systems over encrypted mesh networks.
 
 ## Overview
 
-agentic-mesh provides infrastructure for peer-to-peer state synchronization using CRDTs (Conflict-free Replicated Data Types) over encrypted Nebula tunnels. It handles peer discovery, connection management, real-time sync, and offline message queuing.
+agentic-mesh provides the networking infrastructure for distributed multi-agent systems. It handles encrypted peer-to-peer connectivity, agent protocol integration, message routing, and state synchronization — so agent frameworks can focus on orchestration logic rather than transport concerns.
 
-**Key components:**
+**Used by [multi-agent-protocol](https://github.com/multi-agent-protocol/multi-agent-protocol)** as the P2P transport layer for MAP clients, agents, and peers.
 
-- **NebulaMesh** - Peer connectivity and connection management over Nebula networks
-- **YjsSyncProvider** - CRDT synchronization using Yjs
-- **MessageChannel** - Typed pub/sub and RPC messaging between peers
-- **CertManager** - Nebula certificate lifecycle management
-- **LighthouseManager** - Nebula lighthouse process management
+**Key capabilities:**
 
-## Prerequisites
+- **Pluggable transports** — Nebula, Tailscale, and Headscale backends via a unified `TransportAdapter` interface
+- **Agent protocol support** — Built-in [ACP](https://github.com/anthropics/agent-control-protocol) (Agent Control Protocol) and [MAP](https://github.com/multi-agent-protocol/multi-agent-protocol) (Multi-Agent Protocol) integration
+- **Git over mesh** — `git-remote-mesh://` protocol for repository sync over encrypted tunnels
+- **CRDT synchronization** — Yjs (in-memory) and cr-sqlite (SQLite) sync providers
+- **Typed messaging** — Pub/sub and RPC channels with offline queuing
+- **Certificate management** — Nebula PKI lifecycle, lighthouse management
 
-agentic-mesh requires [Nebula](https://github.com/slackhq/nebula) to be installed:
+## Installation
+
+```bash
+npm install agentic-mesh
+```
+
+For Nebula transport, install [Nebula](https://github.com/slackhq/nebula):
 
 ```bash
 # macOS
@@ -26,46 +33,34 @@ brew install nebula
 curl -LO https://github.com/slackhq/nebula/releases/latest/download/nebula-linux-amd64.tar.gz
 tar xzf nebula-linux-amd64.tar.gz
 sudo mv nebula nebula-cert /usr/local/bin/
-
-# Verify installation
-nebula-cert -version
-```
-
-## Installation
-
-```bash
-npm install agentic-mesh
 ```
 
 ## Quick Start
 
-### 1. Create certificates
+### As a transport layer for MAP
 
-```bash
-# Create a root CA
-npx agentic-mesh cert create-ca --name my-mesh
-
-# Sign certificates for each peer
-npx agentic-mesh cert sign --name alice --ca my-mesh --ip 10.42.0.10/24
-npx agentic-mesh cert sign --name bob --ca my-mesh --ip 10.42.0.11/24
-```
-
-### 2. Generate Nebula configs
-
-```bash
-# Generate peer config
-npx agentic-mesh config generate \
-  --ca-cert ./certs/my-mesh.crt \
-  --cert ./certs/alice.crt \
-  --key ./certs/alice.key \
-  --lighthouses "10.42.0.1=lighthouse.example.com:4242" \
-  --output nebula.yaml
-```
-
-### 3. Connect and sync
+agentic-mesh is used by the [multi-agent-protocol SDK](https://github.com/multi-agent-protocol/multi-agent-protocol) to provide encrypted mesh connectivity:
 
 ```typescript
-import { NebulaMesh, YjsSyncProvider } from 'agentic-mesh'
+import { ClientConnection } from '@multi-agent-protocol/sdk'
+
+// Connect a MAP client over an encrypted mesh transport
+const client = await ClientConnection.connectMesh({
+  transport,
+  peer: { peerId: 'server', address: '10.0.0.1', port: 4242 },
+  localPeerId: 'my-client',
+  name: 'MeshClient',
+  reconnection: true,
+})
+
+// Use the MAP protocol normally
+const agents = await client.listAgents()
+```
+
+### As a standalone mesh
+
+```typescript
+import { NebulaMesh, YjsSyncProvider, MessageChannel } from 'agentic-mesh'
 
 // Create mesh connection
 const mesh = new NebulaMesh({
@@ -77,71 +72,101 @@ const mesh = new NebulaMesh({
 
 await mesh.connect()
 
-// Create sync provider
+// Sync state with CRDT
 const provider = new YjsSyncProvider(mesh, { namespace: 'my-project' })
 await provider.start()
 
-// Get a shared map (syncs automatically)
 const shared = provider.getMap<string>('config')
 shared.set('version', '1.0.0')
 
-// Listen for changes from other peers
-shared.observe((event) => {
-  console.log('Data changed:', Object.fromEntries(shared.entries()))
-})
-```
-
-### 4. Send messages between peers
-
-```typescript
-import { MessageChannel } from 'agentic-mesh'
-
-// Create typed channel
-interface MyMessages {
-  'task:run': { taskId: string }
-  'task:result': { taskId: string; output: string }
-}
-
+// Send typed messages between peers
 const channel = mesh.createChannel<MyMessages>('tasks')
-
-// Send message
 await channel.send('bob', 'task:run', { taskId: '123' })
-
-// Handle incoming messages
-channel.on('task:run', (from, payload) => {
-  console.log(`Task ${payload.taskId} requested by ${from}`)
-})
-
-// Request/response pattern
 const result = await channel.request('bob', 'task:run', { taskId: '456' })
 ```
 
-## CLI Reference
+### ACP over mesh
+
+Bridge Agent Control Protocol sessions over the mesh:
+
+```typescript
+import { AcpMeshAdapter, meshStream } from 'agentic-mesh'
+import { AgentSideConnection } from '@agentclientprotocol/sdk'
+
+// Create an ACP-compatible stream over mesh
+const stream = meshStream(mesh, { peerId: 'client-peer' })
+const connection = new AgentSideConnection(
+  (conn) => new MyAcpAgent(conn),
+  stream
+)
+```
+
+### Git over mesh
+
+Clone and push repositories over encrypted tunnels:
 
 ```bash
-# Certificate management
-agentic-mesh cert create-ca --name <name>
-agentic-mesh cert create-user-ca --name <name> --root-ca <ca>
-agentic-mesh cert sign --name <name> --ca <ca> --ip <nebula-ip>
-agentic-mesh cert renew --name <name>
-agentic-mesh cert revoke --name <name>
-agentic-mesh cert list
-agentic-mesh cert verify --name <name>
-agentic-mesh cert info --name <name>
+git clone git-remote-mesh://peer-id/repository
+```
 
-# Configuration generation
-agentic-mesh config generate --ca-cert <path> --cert <path> --key <path> --lighthouses <list>
-agentic-mesh config generate-lighthouse --ca-cert <path> --cert <path> --key <path> --ip <ip>
+## Architecture
 
-# Lighthouse management
-agentic-mesh lighthouse create --name <name> --ip <ip> --endpoint <endpoint> ...
-agentic-mesh lighthouse start --name <name>
-agentic-mesh lighthouse stop --name <name>
-agentic-mesh lighthouse status --name <name>
-agentic-mesh lighthouse list
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                         agentic-mesh                              │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
+│  │   MAP    │  │   ACP    │  │   Sync   │  │     Channel      │  │
+│  │  Server  │  │ Adapter  │  │ Provider │  │   (Pub/Sub/RPC)  │  │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───────┬──────────┘  │
+│       └──────────────┴─────────────┴────────────────┘              │
+│                              │                                     │
+│                     ┌────────┴────────┐                            │
+│  ┌──────────────┐   │   MeshContext   │   ┌──────────────┐        │
+│  │ CertManager  │   │   Interface     │   │ Git Transport│        │
+│  │ + Lighthouse │   └────────┬────────┘   │              │        │
+│  └──────────────┘            │            └──────────────┘        │
+│                     ┌────────┴────────┐                            │
+│                     │ TransportAdapter │                            │
+│                     └──┬──────┬──────┬┘                            │
+│                        │      │      │                             │
+│                   Nebula  Tailscale  Headscale                     │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+                             │
+                    Encrypted P2P Tunnels
+```
 
-# Diagnostics
-agentic-mesh doctor
+### Transport Abstraction
+
+The `TransportAdapter` interface supports multiple encrypted transport backends:
+
+| Transport | Best For | Setup |
+|-----------|----------|-------|
+| **Nebula** | Air-gapped, enterprise, full control | Self-hosted CA + lighthouses |
+| **Tailscale** | Quick dev/testing, zero-config | Install + login |
+| **Headscale** | Self-hosted alternative to Tailscale | Self-hosted coordination server |
+
+```typescript
+// Nebula transport
+const mesh = new NebulaMesh({
+  peerId: 'peer-1',
+  nebulaIp: '10.42.0.10',
+  port: 7946,
+  peers: [{ id: 'peer-2', nebulaIp: '10.42.0.11' }],
+})
+
+// Transport features are configurable
+const mesh = new NebulaMesh({
+  // ...
+  features: {
+    hubElection: true,
+    healthMonitoring: 'transport',
+    namespaceRegistry: true,
+    offlineQueue: true,
+  },
+})
 ```
 
 ## API Overview
@@ -166,23 +191,46 @@ mesh.on('peer:left', handler)
 mesh.on('hub:changed', handler)
 ```
 
+### AcpMeshAdapter
+
+Bridge ACP protocol over mesh:
+
+```typescript
+const adapter = new AcpMeshAdapter(mesh)
+await adapter.start()
+
+adapter.onRequest(async (request, from, respond) => {
+  const response = await server.handleRequest(request)
+  respond(response)
+})
+
+await adapter.request(peerId, acpRequest, timeout)
+adapter.broadcast(notification)
+```
+
+### MapServer
+
+Multi-Agent Protocol server for agent orchestration:
+
+```typescript
+const mapServer = new MapServer({
+  systemId: 'my-system',
+  federation: { enabled: true },
+})
+```
+
 ### YjsSyncProvider
 
 CRDT synchronization:
 
 ```typescript
 const provider = new YjsSyncProvider(mesh, { namespace: 'project' })
-
 await provider.start()
-await provider.stop()
 
 provider.getMap(name)     // Get Y.Map
 provider.getArray(name)   // Get Y.Array
 provider.getText(name)    // Get Y.Text
 provider.getDoc()         // Get underlying Y.Doc
-
-provider.on('synced', handler)
-provider.on('peer:synced', handler)
 ```
 
 ### MessageChannel
@@ -209,21 +257,40 @@ const certManager = new CertManager({ certsDir: './certs' })
 await certManager.initialize()
 
 await certManager.createRootCA({ name, duration, groups })
-await certManager.createUserCA({ name, rootCAName, duration, groups })
 await certManager.signServerCert({ name, caName, nebulaIp, duration, groups })
-await certManager.renewServerCert(name)
-await certManager.revokeCert(name, reason)
+```
 
-certManager.listCertificates()
-certManager.getCertificate(name)
-await certManager.verifyCert(name)
+## CLI Reference
+
+```bash
+# Certificate management
+agentic-mesh cert create-ca --name <name>
+agentic-mesh cert sign --name <name> --ca <ca> --ip <nebula-ip>
+agentic-mesh cert list
+agentic-mesh cert verify --name <name>
+agentic-mesh cert renew --name <name>
+agentic-mesh cert revoke --name <name>
+
+# Configuration generation
+agentic-mesh config generate --ca-cert <path> --cert <path> --key <path> --lighthouses <list>
+
+# Lighthouse management
+agentic-mesh lighthouse create --name <name> --ip <ip> --endpoint <endpoint>
+agentic-mesh lighthouse start --name <name>
+agentic-mesh lighthouse stop --name <name>
+agentic-mesh lighthouse status --name <name>
+
+# Diagnostics
+agentic-mesh doctor
 ```
 
 ## Documentation
 
-- [Usage Guide](./docs/USAGE.md) - Detailed setup and API documentation
-- [Architecture](./docs/agentic-mesh.md) - Design decisions and architecture overview
-- [Sudocode Integration](./docs/mesh-integration.md) - Example integration with sudocode
+- [Usage Guide](./docs/USAGE.md) — Detailed setup and API documentation
+- [Architecture](./docs/agentic-mesh.md) — Design decisions and architecture overview
+- [Transport Design](./docs/pluggable-transport-plan.md) — Pluggable transport abstraction
+- [Transport Evaluation](./docs/tailscale-headscale-evaluation.md) — Nebula vs Tailscale vs Headscale
+- [Integration Example](./docs/mesh-integration.md) — Sudocode integration patterns
 
 ## License
 

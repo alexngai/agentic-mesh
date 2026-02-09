@@ -1,5 +1,5 @@
 // agentic-mesh
-// P2P CRDT sync library over Nebula mesh networks
+// Transport coordination and configuration layer for multi-agent systems
 
 // Core exports
 export { NebulaMesh } from './mesh'
