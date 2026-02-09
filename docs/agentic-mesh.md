@@ -1,61 +1,73 @@
-# agentic-mesh: P2P CRDT Sync Library
+# agentic-mesh: Transport Coordination for Multi-Agent Systems
 
 ## Overview
 
-`agentic-mesh` is a standalone TypeScript library for peer-to-peer CRDT synchronization over Nebula mesh networks. It provides networking infrastructure for distributed applications that need real-time state synchronization without a central server.
+`agentic-mesh` is a TypeScript library that provides transport coordination and configuration infrastructure for distributed multi-agent systems. It handles encrypted peer-to-peer connectivity, agent protocol integration, message routing, and state synchronization over mesh networks.
 
 | | |
 |---|---|
 | **Package** | `agentic-mesh` |
 | **License** | MIT |
 | **Runtime** | Node.js 18+ |
-| **Dependencies** | Nebula (external binary), Yjs (bundled) |
+| **Transports** | Nebula, Tailscale, Headscale (pluggable) |
+| **Protocols** | MAP (Multi-Agent Protocol), ACP (Agent Control Protocol) |
+| **Dependencies** | Transport binary (Nebula/Tailscale), Yjs (bundled), ACP SDK |
 
 ## Use Cases
 
-1. **Resource scaling** - Single user distributing workloads across multiple machines (laptop, cloud VMs, CI runners)
-2. **Team collaboration** - Multiple users synchronizing shared state with access control
-3. **Offline-first apps** - Applications that work offline and sync when connectivity returns
-4. **Edge computing** - Distributed nodes that need to share state without central coordination
+1. **Multi-agent coordination** - Transport layer for agent frameworks (MAP, ACP) to communicate over encrypted tunnels
+2. **Resource scaling** - Single user distributing workloads across multiple machines (laptop, cloud VMs, CI runners)
+3. **Distributed git** - Repository synchronization over mesh via `git-remote-mesh://` protocol
+4. **Real-time sync** - CRDT-based state synchronization for collaborative and offline-first applications
+5. **Edge computing** - Distributed nodes sharing state without central coordination
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              agentic-mesh                                   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐  ┌─────────────┐  │
-│  │  CertManager  │  │  NebulaMesh   │  │ SyncProvider  │  │  Channel    │  │
-│  │               │  │               │  │    (Yjs)      │  │             │  │
-│  │ • CA creation │  │ • Peer mgmt   │  │ • Doc sync    │  │ • Messages  │  │
-│  │ • Cert signing│  │ • Connection  │  │ • Snapshots   │  │ • RPC       │  │
-│  │ • Config gen  │  │ • Health      │  │ • Conflicts   │  │ • Queue     │  │
-│  │ • Revocation  │  │ • Hub logic   │  │               │  │             │  │
-│  └───────────────┘  └───────────────┘  └───────────────┘  └─────────────┘  │
-│          │                  │                  │                 │          │
-│          └──────────────────┴──────────────────┴─────────────────┘          │
-│                                     │                                       │
-│                          ┌──────────┴──────────┐                            │
-│                          │   Transport Layer   │                            │
-│                          │  (Nebula tunnels)   │                            │
-│                          └──────────┬──────────┘                            │
-│                                     │                                       │
-└─────────────────────────────────────┼───────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              agentic-mesh                                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                                │
+│  ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐  │
+│  │ MAP Server │ │ACP Adapter │ │SyncProvider│ │  Channel   │ │    Git     │  │
+│  │            │ │            │ │ (Yjs/SQL)  │ │(Pub/Sub/   │ │ Transport  │  │
+│  │ • Agents   │ │ • Bridge   │ │ • Doc sync │ │  RPC)      │ │ • Remote   │  │
+│  │ • Scopes   │ │ • Stream   │ │ • Snapshots│ │ • Messages │ │   helper   │  │
+│  │ • Events   │ │ • Sessions │ │ • Conflicts│ │ • Queue    │ │ • Pack     │  │
+│  │ • Routing  │ │            │ │            │ │            │ │   stream   │  │
+│  │ • Federate │ │            │ │            │ │            │ │            │  │
+│  └─────┬──────┘ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘  │
+│        └──────────────┴──────────────┴──────────────┴──────────────┘          │
+│                                     │                                         │
+│  ┌──────────────┐        ┌──────────┴──────────┐                              │
+│  │ CertManager  │        │   MeshContext        │                              │
+│  │ + Lighthouse │        │   Interface          │                              │
+│  └──────────────┘        └──────────┬──────────┘                              │
+│                                     │                                         │
+│                          ┌──────────┴──────────┐                              │
+│                          │  TransportAdapter    │                              │
+│                          │    Interface         │                              │
+│                          └───┬───────┬───────┬──┘                              │
+│                              │       │       │                                │
+│                         Nebula  Tailscale  Headscale                           │
+│                                                                                │
+└──────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Nebula (external)                                 │
-│                                                                             │
-│  • Encrypted P2P tunnels (Noise Protocol + AES-256-GCM)                     │
-│  • UDP hole punching for NAT traversal                                      │
-│  • Certificate-based mutual authentication                                  │
-│  • Lighthouse for peer discovery                                            │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
+                          Encrypted P2P Tunnels
+                   (Noise/WireGuard + NAT traversal)
 ```
+
+### Layer Summary
+
+| Layer | Components | Purpose |
+|-------|-----------|---------|
+| **Protocol** | MAP Server, ACP Adapter | Agent orchestration and control protocols |
+| **Application** | SyncProvider, Channel, Git Transport | Data sync, messaging, git operations |
+| **Mesh** | MeshContext, CertManager | Peer management, identity, hub election |
+| **Transport** | TransportAdapter implementations | Encrypted connectivity (Nebula/Tailscale/Headscale) |
 
 ---
 
@@ -65,20 +77,30 @@
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Transport | Nebula (hard dependency) | Proven at scale (Slack 50k+ hosts), strong security, NAT traversal |
-| CRDT | Yjs (hard dependency) | Best-in-class performance, mature ecosystem, good TypeScript support |
-| Certificate model | Hierarchical PKI | Enables user sub-CAs, natural permission mapping |
+| Transport | Pluggable (Nebula, Tailscale, Headscale) | `TransportAdapter` interface allows choosing the best transport per deployment |
+| Agent protocols | MAP + ACP integration | Direct support for the two major agent coordination protocols |
+| CRDT | Yjs + cr-sqlite | In-memory (Yjs) and persistent (cr-sqlite) sync options |
+| Certificate model | Hierarchical PKI (Nebula) | Enables user sub-CAs, natural permission mapping |
 | Hub model | Priority-based sync anchor | Deterministic failover, no election complexity |
 | Offline handling | Persistent queue | Operations survive restarts, drain on reconnect |
 | Permissions | Certificate groups (static) | Simple, verifiable, no runtime ACL state |
+| Features | Optional/toggleable | Hub election, health monitoring, namespace registry can be disabled |
+
+### What agentic-mesh Provides
+
+- **Transport coordination** - Encrypted P2P connectivity for agent systems
+- **Protocol bridges** - ACP and MAP protocol support over mesh
+- **Git transport** - Repository sync over mesh tunnels
+- **CRDT sync** - Yjs and cr-sqlite providers
+- **Message routing** - Typed channels with RPC and offline queuing
+- **Identity/PKI** - Certificate management and lighthouse control
 
 ### What agentic-mesh Does NOT Do
 
-- **Application schemas** - Consumer defines their own Yjs document structure
+- **Agent logic** - Consumer implements agent behavior; agentic-mesh provides transport
+- **Application schemas** - Consumer defines their own data structures
 - **Persistence format** - Consumer decides how to persist (JSONL, SQLite, etc.)
-- **Business logic** - No domain-specific operations (tasks, execution, etc.)
-- **End-user CLI** - Only library helpers; consumer builds their own CLI
-- **Nebula process management** - User installs and runs Nebula separately
+- **Transport process management** - User installs and runs Nebula/Tailscale separately
 
 ---
 
@@ -733,19 +755,51 @@ sudo nebula -config .myapp/mesh/nebula.yaml
 
 ---
 
+## Integration with multi-agent-protocol
+
+The [multi-agent-protocol](https://github.com/multi-agent-protocol/multi-agent-protocol) SDK uses agentic-mesh as an optional peer dependency for P2P transport:
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│                   multi-agent-protocol/ts-sdk                      │
+├───────────────────────────────────────────────────────────────────┤
+│  ClientConnection / AgentConnection / MAPMeshPeer                  │
+│                         │                                          │
+│  Stream Interface (ReadableStream/WritableStream)                  │
+│  ├─ ndJsonStream (stdio)                                          │
+│  ├─ websocketStream (WebSocket)                                   │
+│  └─ agenticMeshStream ← agentic-mesh                              │
+│                         │                                          │
+├─────────────────────────┼─────────────────────────────────────────┤
+│               AGENTIC-MESH LAYER                                   │
+│  TunnelStream (NDJSON over encrypted transport)                    │
+│  TransportAdapter (Nebula/Tailscale/Headscale)                    │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+Key integration points:
+- `agenticMeshStream()` adapts `TunnelStream` to MAP's stream interface
+- `MAPMeshPeer` wraps `createMeshPeer` for decentralized peer management
+- `ClientConnection.connectMesh()` / `AgentConnection.connectMesh()` use dynamic imports
+
 ## Future Considerations
 
 ### Planned
 
-- Pluggable transport (Tailscale, ZeroTier, WireGuard)
 - Alternative CRDTs (Automerge)
 - Awareness/presence layer
 - Certificate auto-renewal
+- Dual-transport mode for hybrid deployments
+
+### Implemented (previously planned)
+
+- ~~Pluggable transport~~ — `TransportAdapter` with Nebula, Tailscale, Headscale
+- ~~Agent protocol support~~ — ACP adapter and MAP server
+- ~~Git transport~~ — `git-remote-mesh://` protocol
+- ~~Optional features~~ — Hub election, health monitoring, namespace registry toggleable
 
 ### Non-Goals
 
-- Application-specific logic
-- Database/persistence
-- End-user CLI
-- Nebula process management
+- Agent-specific logic (belongs in consumer)
+- Transport process management (user runs Nebula/Tailscale)
 - Binary distribution
