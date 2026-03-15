@@ -413,6 +413,17 @@ export class MapServer extends EventEmitter {
   }
 
   /**
+   * Replace the default delivery handler with a custom implementation.
+   * The custom handler receives all messages after address resolution
+   * and is responsible for final delivery.
+   *
+   * The previous handler is returned so it can be used as a fallback.
+   */
+  setDeliveryHandler(handler: DeliveryHandler): DeliveryHandler {
+    return this.messageRouter.setDeliveryHandler(handler)
+  }
+
+  /**
    * Deliver a message to a local agent.
    */
   private async deliverToAgent(agentId: AgentId, message: Message): Promise<boolean> {

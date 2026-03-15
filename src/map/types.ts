@@ -1094,7 +1094,14 @@ export interface ResolvedAddress {
 export interface MeshPeerConfig {
   peerId: string
   peerName?: string
-  transport: {
+  /**
+   * When true, the peer runs in-process without binding a server port.
+   * Transport is optional in embedded mode — the MAP server, agent registration,
+   * and local message routing all work without a transport.
+   * Transport can still be provided for P2P connectivity.
+   */
+  embedded?: boolean
+  transport?: {
     type: 'nebula' | 'tailscale' | 'headscale'
     config: import('../transports/types').TransportConfig
   }

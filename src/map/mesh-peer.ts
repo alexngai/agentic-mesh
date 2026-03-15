@@ -23,10 +23,12 @@ import type {
   SendResult,
   EventSubscription,
   MapAgentConnectionConfig,
+  MapGatewayConfig,
 } from './types'
 import { MapServer } from './server/map-server'
 import { AgentConnection, createAgentConnection } from './connection/agent'
 import { PeerConnection, createPeerConnection } from './connection/peer'
+import { FederationGateway, createFederationGateway } from './federation/gateway'
 import { TunnelStream } from './stream/tunnel-stream'
 import { BaseConnection } from './connection/base'
 import {
@@ -39,7 +41,18 @@ import type { AnyGitMessage } from '../git/types'
 /**
  * Factory for creating transport adapters.
  */
-export type TransportFactory = (config: MeshPeerConfig['transport']) => TransportAdapter
+export type TransportFactory = (config: NonNullable<MeshPeerConfig['transport']>) => TransportAdapter
+
+/**
+ * Configuration for creating an embedded MeshPeer.
+ * Transport is optional — the peer works fully in-process without one.
+ */
+export interface EmbeddedMeshPeerConfig {
+  peerId: string
+  peerName?: string
+  transport?: MeshPeerConfig['transport']
+  map?: MeshPeerConfig['map']
+}
 
 /**
  * Mesh Peer - the unified mesh node with MAP protocol support.
@@ -54,6 +67,7 @@ export class MeshPeer extends EventEmitter {
   private transportFactory: TransportFactory | null = null
   private readonly peerConnections = new Map<string, PeerConnection>()
   private readonly agentConnections = new Map<AgentId, AgentConnection>()
+  private readonly federationGateways = new Map<string, FederationGateway>()
   private gitService: GitTransportService | null = null
   private running = false
 
@@ -84,6 +98,20 @@ export class MeshPeer extends EventEmitter {
     }
 
     this.setupServerEvents()
+  }
+
+  /**
+   * Create an embedded MeshPeer that runs in-process without a transport.
+   * The MAP server, agent registration, and local messaging all work
+   * without binding a server port or requiring a network transport.
+   *
+   * Transport can be added later via `start(transport)` for P2P connectivity.
+   */
+  static createEmbedded(config: EmbeddedMeshPeerConfig): MeshPeer {
+    return new MeshPeer({
+      ...config,
+      embedded: true,
+    })
   }
 
   /**
@@ -147,6 +175,10 @@ export class MeshPeer extends EventEmitter {
 
   /**
    * Start the mesh peer.
+   *
+   * In embedded mode, transport is optional. The MAP server, agent registration,
+   * and local message routing all work without a transport. If a transport is
+   * provided (either as parameter or via factory), it will be started for P2P connectivity.
    */
   async start(transport?: TransportAdapter): Promise<void> {
     if (this.running) return
@@ -154,27 +186,29 @@ export class MeshPeer extends EventEmitter {
     // Create or use provided transport
     if (transport) {
       this.transport = transport
-    } else if (this.transportFactory) {
+    } else if (this.transportFactory && this.config.transport) {
       this.transport = this.transportFactory(this.config.transport)
-    } else {
-      throw new Error('No transport provided and no transport factory configured')
+    } else if (!this.config.embedded) {
+      throw new Error('No transport provided and no transport factory configured. Use embedded mode for in-process operation without transport.')
     }
 
-    // Start transport
-    await this.transport.start()
-    this.setupTransportHandlers()
+    // Start transport if available
+    if (this.transport) {
+      await this.transport.start()
+      this.setupTransportHandlers()
+    }
 
     // Start MAP server
     await this.mapServer.start()
 
     // Start git transport service if enabled
-    if (this.gitService) {
+    if (this.gitService && this.transport) {
       this.gitService.setPeerSender(this.createGitPeerSender())
       await this.gitService.start()
     }
 
     // Connect to initial peers
-    if (this.config.peers) {
+    if (this.config.peers && this.transport) {
       for (const endpoint of this.config.peers) {
         this.connectToPeer(endpoint).catch((err) => {
           this.emit('error', err)
@@ -196,6 +230,12 @@ export class MeshPeer extends EventEmitter {
     if (this.gitService) {
       await this.gitService.stop()
     }
+
+    // Disconnect federation gateways
+    for (const [systemId, gateway] of this.federationGateways) {
+      await gateway.disconnect('shutting down')
+    }
+    this.federationGateways.clear()
 
     // Disconnect from all peers
     for (const [peerId, conn] of this.peerConnections) {
@@ -520,6 +560,94 @@ export class MeshPeer extends EventEmitter {
    */
   listScopes(): Scope[] {
     return this.mapServer.listScopes()
+  }
+
+  // ==========================================================================
+  // Federation
+  // ==========================================================================
+
+  /**
+   * Establish a federation link with a remote MAP system.
+   * Creates a FederationGateway if one doesn't exist for this remote system.
+   * Returns the gateway for direct interaction.
+   *
+   * To connect the gateway, you must call `gateway.connect(stream)` with a
+   * MapStream to the remote system. If a peer connection exists for the remote
+   * system, `federateWith` will create a TunnelStream from that connection.
+   */
+  async federateWith(
+    remoteSystemId: string,
+    config?: Partial<MapGatewayConfig>
+  ): Promise<FederationGateway> {
+    // Return existing gateway if already federated
+    let gateway = this.federationGateways.get(remoteSystemId)
+    if (gateway) {
+      return gateway
+    }
+
+    // Create gateway
+    gateway = createFederationGateway(this.mapServer, {
+      localSystemId: this.peerId,
+      remoteSystemId,
+      remoteEndpoint: config?.remoteEndpoint ?? '',
+      ...config,
+    })
+
+    // Forward gateway events
+    gateway.on('connected', (systemId) => {
+      this.emit('federation:connected', systemId)
+    })
+
+    gateway.on('disconnected', (systemId, reason) => {
+      this.emit('federation:disconnected', systemId)
+    })
+
+    gateway.on('error', (error) => {
+      this.emit('error', error)
+    })
+
+    this.federationGateways.set(remoteSystemId, gateway)
+
+    // If we have a peer connection to this system, auto-connect via TunnelStream
+    if (this.transport) {
+      const peerConn = this.peerConnections.get(remoteSystemId)
+      if (peerConn?.isConnected) {
+        const stream = new TunnelStream({
+          transport: this.transport,
+          peerId: remoteSystemId,
+          streamId: `federation-${remoteSystemId}`,
+        })
+        await stream.open()
+        await gateway.connect(stream)
+      }
+    }
+
+    return gateway
+  }
+
+  /**
+   * Get an existing federation gateway by remote system ID.
+   */
+  getFederationGateway(remoteSystemId: string): FederationGateway | undefined {
+    return this.federationGateways.get(remoteSystemId)
+  }
+
+  /**
+   * List all active federation gateways.
+   */
+  getFederationGateways(): FederationGateway[] {
+    return Array.from(this.federationGateways.values())
+  }
+
+  /**
+   * Disconnect a federation link.
+   */
+  async defederate(remoteSystemId: string, reason?: string): Promise<void> {
+    const gateway = this.federationGateways.get(remoteSystemId)
+    if (!gateway) return
+
+    await gateway.disconnect(reason)
+    this.federationGateways.delete(remoteSystemId)
   }
 
   // ==========================================================================
