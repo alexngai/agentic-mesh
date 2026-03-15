@@ -383,7 +383,7 @@ export class FederationGateway extends EventEmitter {
     // Emit for external handlers
     this.emit('message:received', envelope)
 
-    // Route to local agents
+    // Route to local agents, preserving _meta from both message levels
     await this.mapServer.send(
       `${envelope.federation.sourceSystem}:${message.from}`,
       message.to,
@@ -391,6 +391,7 @@ export class FederationGateway extends EventEmitter {
       {
         ...message.meta,
         correlationId: envelope.federation.correlationId,
+        _meta: message._meta ?? message.meta?._meta,
       }
     )
   }

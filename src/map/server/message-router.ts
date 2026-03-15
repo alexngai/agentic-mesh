@@ -73,7 +73,7 @@ export class MessageRouter extends EventEmitter {
   private readonly agentRegistry: AgentRegistry
   private readonly scopeManager: ScopeManager
   private readonly eventBus: EventBus
-  private readonly deliveryHandler: DeliveryHandler
+  private deliveryHandler: DeliveryHandler
   private readonly agentPeerMap: Map<AgentId, string>
 
   constructor(config: MessageRouterConfig) {
@@ -84,6 +84,16 @@ export class MessageRouter extends EventEmitter {
     this.eventBus = config.eventBus
     this.deliveryHandler = config.deliveryHandler
     this.agentPeerMap = config.agentPeerMap ?? new Map()
+  }
+
+  /**
+   * Replace the delivery handler.
+   * Returns the previous handler so it can be used as a fallback.
+   */
+  setDeliveryHandler(handler: DeliveryHandler): DeliveryHandler {
+    const previous = this.deliveryHandler
+    this.deliveryHandler = handler
+    return previous
   }
 
   /**
@@ -115,6 +125,7 @@ export class MessageRouter extends EventEmitter {
         ...meta,
         timestamp: now,
       },
+      _meta: meta?._meta,
     }
 
     // Resolve the address to actual targets
