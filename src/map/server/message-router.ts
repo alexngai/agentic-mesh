@@ -29,16 +29,33 @@ import type { ScopeManager } from './scope-manager'
 import type { EventBus } from './event-bus'
 
 /**
- * Delivery handler for sending messages to targets.
+ * Handler for delivering messages to their final destinations.
+ *
+ * Called by MessageRouter after address resolution. Implementations can
+ * intercept delivery to add custom logic (e.g. inbox storage, threading,
+ * read tracking) before or instead of the default delivery path.
+ *
+ * Use `MapServer.setDeliveryHandler()` to install a custom handler.
+ * The previous handler is returned for delegation/fallback.
  */
 export interface DeliveryHandler {
-  /** Deliver to a local agent */
+  /**
+   * Deliver a message to a locally registered agent.
+   * Called by MessageRouter after address resolution.
+   */
   deliverToAgent(agentId: AgentId, message: Message): Promise<boolean>
 
-  /** Forward to a remote peer */
+  /**
+   * Forward a message to a connected peer (another MeshPeer).
+   * Called when the target agent is on a known peer.
+   */
   forwardToPeer(peerId: string, agentIds: AgentId[], message: Message): Promise<boolean>
 
-  /** Route to a federated system */
+  /**
+   * Route a message to a federated system.
+   * Called when the target is on a remote MAP system.
+   * Optional — if not implemented, federation routing is unavailable.
+   */
   routeToFederation?(systemId: string, agentIds: AgentId[], message: Message): Promise<boolean>
 }
 

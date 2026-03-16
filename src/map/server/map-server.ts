@@ -414,10 +414,35 @@ export class MapServer extends EventEmitter {
 
   /**
    * Replace the default delivery handler with a custom implementation.
-   * The custom handler receives all messages after address resolution
-   * and is responsible for final delivery.
    *
-   * The previous handler is returned so it can be used as a fallback.
+   * The custom handler receives all messages after address resolution
+   * and is responsible for final delivery. This allows external systems
+   * (e.g. agent-inbox) to intercept message delivery for custom storage,
+   * threading, read tracking, and other message processing.
+   *
+   * Returns the previous handler so it can be used as a fallback
+   * for operations the custom handler doesn't want to override.
+   *
+   * @param handler - Custom delivery handler
+   * @returns The previous delivery handler
+   *
+   * @example
+   * ```typescript
+   * const previous = server.setDeliveryHandler({
+   *   async deliverToAgent(agentId, message) {
+   *     // Custom delivery logic (e.g. store in inbox)
+   *     storage.putMessage(message);
+   *     return true;
+   *   },
+   *   async forwardToPeer(peerId, agentIds, message) {
+   *     // Delegate to default handler
+   *     return previous.forwardToPeer(peerId, agentIds, message);
+   *   },
+   *   async routeToFederation(systemId, agentIds, message) {
+   *     return previous.routeToFederation?.(systemId, agentIds, message) ?? false;
+   *   },
+   * });
+   * ```
    */
   setDeliveryHandler(handler: DeliveryHandler): DeliveryHandler {
     return this.messageRouter.setDeliveryHandler(handler)

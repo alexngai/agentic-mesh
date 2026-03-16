@@ -145,6 +145,21 @@ examples/
 | `createConnectedStreams` | `src/acp/mesh-stream.ts` | Create paired streams for testing |
 | `TunnelStream` | `src/map/stream/` | NDJSON stream over encrypted transport |
 | `isAcpRequest` / `isAcpResponse` | `src/acp/types.ts` | Type guards for ACP messages |
+| `DeliveryHandler` | `src/map/server/message-router.ts` | Interface for custom message delivery interception |
+| `parseFederatedId` | `src/map/types.ts` | Parse "system:agent" sender IDs from federation |
+| `CHANNEL_PREFIXES` | `src/map/types.ts` | Channel naming convention constants (`proto:` prefix) |
+
+### Integration APIs (Phase 2)
+
+| API | Method/Type | Purpose |
+|-----|-------------|---------|
+| `MapServer.setDeliveryHandler()` | `src/map/server/map-server.ts` | Replace default delivery with custom handler (returns previous for fallback) |
+| `MeshPeer.federateWith()` | `src/map/mesh-peer.ts` | Create/retrieve federation gateway to remote system |
+| `MeshPeer.getFederationGateway()` | `src/map/mesh-peer.ts` | Get existing gateway by remote system ID |
+| `MeshPeer.getFederationGateways()` | `src/map/mesh-peer.ts` | List all active federation gateways |
+| `MeshPeer.defederate()` | `src/map/mesh-peer.ts` | Disconnect federation link and clean up gateway |
+| `FederateConfig` | `src/map/types.ts` | Simplified config for `federateWith()` (buffer, routing) |
+| `FederationGateway` | `src/map/federation/gateway.ts` | Gateway for cross-system message routing |
 
 ## Commands
 
@@ -208,6 +223,9 @@ ACP types in `src/acp/types.ts`:
 
 MAP types in `src/map/types.ts`:
 - `Agent`, `Scope`, `Message`, `Event` - Protocol entities
+- `FederateConfig` - Simplified federation config for `MeshPeer.federateWith()`
+- `ParsedFederatedId`, `parseFederatedId()` - Parse "system:agent" federation sender IDs
+- `CHANNEL_PREFIXES` - Channel naming convention (`proto:` prefix for protocol channels)
 - MAP server, federation, and connection types
 
 Cert types in `src/certs/types.ts`:
@@ -252,8 +270,14 @@ ACP Client → meshStream() → TunnelStream → NebulaMesh → encrypted transp
 MAP Client → agenticMeshStream() → TunnelStream → TransportAdapter → peer
 ```
 - `MapServer` orchestrates agents, scopes, events, and message routing
+- `MapServer.setDeliveryHandler()` allows intercepting message delivery for custom processing
 - Used by multi-agent-protocol SDK as the P2P transport layer
-- Supports federation via gateway
+- Supports federation via `MeshPeer.federateWith()` and `FederationGateway`
+
+**Federation behavior notes:**
+- `FederationGateway` prefixes sender IDs with the source system: `"system-a:alice"` not `"alice"`. Use `parseFederatedId()` to extract system and agent components.
+- `_meta` vendor extension data is preserved end-to-end through the federation pipeline.
+- Channel names should use `CHANNEL_PREFIXES.PROTOCOL` prefix (`"proto:"`) for protocol/infrastructure channels to avoid collisions.
 
 ### Hub System
 - Priority-based hub election (lower priority = more preferred)
