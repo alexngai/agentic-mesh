@@ -24,6 +24,7 @@ import type {
   EventSubscription,
   MapAgentConnectionConfig,
   MapGatewayConfig,
+  FederateConfig,
 } from './types'
 import { MapServer } from './server/map-server'
 import { AgentConnection, createAgentConnection } from './connection/agent'
@@ -568,16 +569,40 @@ export class MeshPeer extends EventEmitter {
 
   /**
    * Establish a federation link with a remote MAP system.
-   * Creates a FederationGateway if one doesn't exist for this remote system.
-   * Returns the gateway for direct interaction.
+   * Creates a FederationGateway if one doesn't exist for this system.
    *
-   * To connect the gateway, you must call `gateway.connect(stream)` with a
-   * MapStream to the remote system. If a peer connection exists for the remote
-   * system, `federateWith` will create a TunnelStream from that connection.
+   * The gateway handles:
+   * - Envelope wrapping (federation headers, system identification)
+   * - Hop counting (configurable maxHops, default 5)
+   * - Loop detection (path tracking to prevent circular routing)
+   * - Message buffering (configurable queue for offline peers)
+   * - JSON-RPC handshake on connect()
+   *
+   * After calling `federateWith()`, the caller must provide a transport
+   * by calling `gateway.connect(stream)` with a MapStream — unless a peer
+   * connection already exists, in which case auto-connect is attempted.
+   *
+   * Accepts either the simplified `FederateConfig` or the full `MapGatewayConfig`.
+   *
+   * @param remoteSystemId - The system ID of the remote MAP system
+   * @param config - Optional gateway configuration
+   * @returns The FederationGateway instance
+   *
+   * @example
+   * ```typescript
+   * // Create gateway with simplified config
+   * const gw = await peer.federateWith("remote-system", {
+   *   buffer: { enabled: true, maxMessages: 1000 },
+   *   routing: { maxHops: 5, trackPath: true },
+   * });
+   *
+   * // Connect via linked streams (test) or let auto-connect handle it (production)
+   * await gw.connect(stream);
+   * ```
    */
   async federateWith(
     remoteSystemId: string,
-    config?: Partial<MapGatewayConfig>
+    config?: FederateConfig | Partial<MapGatewayConfig>
   ): Promise<FederationGateway> {
     // Return existing gateway if already federated
     let gateway = this.federationGateways.get(remoteSystemId)
@@ -585,13 +610,11 @@ export class MeshPeer extends EventEmitter {
       return gateway
     }
 
+    // Normalize config to MapGatewayConfig
+    const gatewayConfig = this.toGatewayConfig(remoteSystemId, config)
+
     // Create gateway
-    gateway = createFederationGateway(this.mapServer, {
-      localSystemId: this.peerId,
-      remoteSystemId,
-      remoteEndpoint: config?.remoteEndpoint ?? '',
-      ...config,
-    })
+    gateway = createFederationGateway(this.mapServer, gatewayConfig)
 
     // Forward gateway events
     gateway.on('connected', (systemId) => {
@@ -627,6 +650,7 @@ export class MeshPeer extends EventEmitter {
 
   /**
    * Get an existing federation gateway by remote system ID.
+   * Returns undefined if no gateway exists for the given system.
    */
   getFederationGateway(remoteSystemId: string): FederationGateway | undefined {
     return this.federationGateways.get(remoteSystemId)
@@ -640,7 +664,9 @@ export class MeshPeer extends EventEmitter {
   }
 
   /**
-   * Disconnect a federation link.
+   * Disconnect a federation link and clean up the gateway.
+   * @param remoteSystemId - The system to defederate from
+   * @param reason - Optional reason for defederation
    */
   async defederate(remoteSystemId: string, reason?: string): Promise<void> {
     const gateway = this.federationGateways.get(remoteSystemId)
@@ -648,6 +674,48 @@ export class MeshPeer extends EventEmitter {
 
     await gateway.disconnect(reason)
     this.federationGateways.delete(remoteSystemId)
+  }
+
+  /**
+   * Normalize FederateConfig or partial MapGatewayConfig to a full MapGatewayConfig.
+   */
+  private toGatewayConfig(
+    remoteSystemId: string,
+    config?: FederateConfig | Partial<MapGatewayConfig>
+  ): MapGatewayConfig {
+    if (!config) {
+      return {
+        localSystemId: this.peerId,
+        remoteSystemId,
+        remoteEndpoint: '',
+      }
+    }
+
+    // If it has remoteEndpoint, treat as MapGatewayConfig
+    if ('remoteEndpoint' in config && config.remoteEndpoint !== undefined) {
+      return {
+        localSystemId: this.peerId,
+        remoteSystemId,
+        remoteEndpoint: '',
+        ...config,
+      }
+    }
+
+    // Treat as FederateConfig
+    const fc = config as FederateConfig
+    return {
+      localSystemId: fc.localSystemId ?? this.peerId,
+      remoteSystemId: fc.remoteSystemId ?? remoteSystemId,
+      remoteEndpoint: '',
+      buffer: fc.buffer ? {
+        enabled: fc.buffer.enabled,
+        maxMessages: fc.buffer.maxMessages,
+      } : undefined,
+      routing: fc.routing ? {
+        maxHops: fc.routing.maxHops,
+        trackPath: fc.routing.trackPath,
+      } : undefined,
+    }
   }
 
   // ==========================================================================

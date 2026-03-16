@@ -185,6 +185,26 @@ export const MAP_METHODS = {
 } as const
 
 // =============================================================================
+// Channel Naming Convention
+// =============================================================================
+
+/**
+ * Channel name prefixes for avoiding collisions on shared meshes.
+ *
+ * Protocol/infrastructure channels use "proto:" prefix.
+ * Application channels use no prefix.
+ *
+ * @example
+ * ```typescript
+ * const channelName = `${CHANNEL_PREFIXES.PROTOCOL}agent-inbox`; // "proto:agent-inbox"
+ * ```
+ */
+export const CHANNEL_PREFIXES = {
+  /** Prefix for protocol/infrastructure channels */
+  PROTOCOL: 'proto:',
+} as const
+
+// =============================================================================
 // Error Types
 // =============================================================================
 
@@ -506,6 +526,50 @@ export function isParticipantAddress(address: Address): address is ParticipantAd
 /** Check if address is a federated address */
 export function isFederatedAddress(address: Address): address is FederatedAddress {
   return typeof address === 'object' && 'system' in address && typeof address.system === 'string'
+}
+
+// =============================================================================
+// Federation ID Utilities
+// =============================================================================
+
+/**
+ * Parsed result of a federation-prefixed sender ID.
+ *
+ * When a message crosses a FederationGateway, the sender ID is prefixed
+ * with the source system ID: "system-a:alice" instead of "alice".
+ * This provides unambiguous cross-system identity.
+ */
+export interface ParsedFederatedId {
+  /** The source system ID, if the ID is federation-prefixed */
+  system?: string
+  /** The agent ID (without system prefix) */
+  agent: string
+}
+
+/**
+ * Parse a potentially federation-prefixed sender ID.
+ *
+ * FederationGateway prefixes sender IDs with the source system to provide
+ * unambiguous cross-system identity: "system-a:alice" instead of "alice".
+ *
+ * @param id - The sender ID, potentially prefixed with "system:"
+ * @returns Parsed system and agent components
+ *
+ * @example
+ * ```typescript
+ * parseFederatedId("system-a:alice")  // { system: "system-a", agent: "alice" }
+ * parseFederatedId("alice")           // { agent: "alice" }
+ * ```
+ */
+export function parseFederatedId(id: string): ParsedFederatedId {
+  const colonIndex = id.indexOf(':')
+  if (colonIndex > 0 && colonIndex < id.length - 1) {
+    return {
+      system: id.slice(0, colonIndex),
+      agent: id.slice(colonIndex + 1),
+    }
+  }
+  return { agent: id }
 }
 
 // =============================================================================
@@ -992,6 +1056,32 @@ export interface MapClientBridgeConfig {
 // =============================================================================
 // Gateway Types
 // =============================================================================
+
+/**
+ * Simplified configuration for `MeshPeer.federateWith()`.
+ *
+ * Provides a consumer-friendly subset of gateway options. Internally
+ * mapped to `MapGatewayConfig` by MeshPeer.
+ */
+export interface FederateConfig {
+  /** Override the local system ID (defaults to MeshPeer.peerId) */
+  localSystemId?: string
+
+  /** The remote system ID (typically matches remoteSystemId param) */
+  remoteSystemId?: string
+
+  /** Message buffering for offline peers */
+  buffer?: {
+    enabled: boolean
+    maxMessages?: number   // Default: 1000
+  }
+
+  /** Routing safety */
+  routing?: {
+    maxHops?: number       // Default: 5
+    trackPath?: boolean    // Default: true
+  }
+}
 
 /**
  * Configuration for a federation gateway.
